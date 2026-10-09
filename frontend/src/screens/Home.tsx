@@ -5,6 +5,7 @@ import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import { apiFetch, apiUpload, askDocument } from "@/lib/api";
 import type {
+  AskSourceReference,
   ConfigStatusResponse,
   DocumentCreateResponse,
   DocumentStatus,
@@ -30,7 +31,11 @@ interface Message {
   role: MessageRole;
   text: string;
   time: string;
-  source?: string | null;
+  /** Full source reference from `AskResponse.source` (US-013-1 contract).
+   * Null/undefined whenever the reply is the verbatim fallback — in which
+   * case no source reference element is rendered at all (AC-042). */
+  source?: AskSourceReference | null;
+  isFallback?: boolean;
 }
 
 interface Pending {
@@ -105,16 +110,21 @@ function toLibraryRow(created: DocumentCreateResponse): DocumentStatusResponse {
   };
 }
 
-/** Human label for a source reference: pages for PDFs, chunk numbers
- * otherwise (mirrors backend/app/schemas.py `SourceReference`, where exactly
- * one of the two is set). */
-function sourceLabel(
-  source: { page_number: number | null; chunk_index: number | null } | null,
-): string | null {
-  if (!source) return null;
-  if (source.page_number != null) return `Page ${source.page_number}`;
-  if (source.chunk_index != null) return `Chunk ${source.chunk_index}`;
-  return null;
+/** One readable line for a single source reference: the document name plus
+ * its page (PDF, AC-040) or chunk number (DOCX/TXT, AC-041) — mirroring
+ * backend/app/schemas.py `SourceReference`, where exactly one of
+ * `page_number`/`chunk_index` is set. The contract carries exactly one
+ * reference per answer, so there is nothing to de-duplicate beyond this
+ * single line; a future multi-reference contract would collapse into the
+ * same de-duplicated-join shape here. */
+function sourceLine(source: AskSourceReference): string {
+  if (source.page_number != null) {
+    return `${source.document_name} · Page ${source.page_number}`;
+  }
+  if (source.chunk_index != null) {
+    return `${source.document_name} · Chunk ${source.chunk_index}`;
+  }
+  return source.document_name;
 }
 
 export default function Screen() {
@@ -296,7 +306,10 @@ export default function Screen() {
         id: `m_${Date.now()}_a`,
         role: "assistant",
         text: res.answer,
-        source: sourceLabel(res.source),
+        // AC-042: fallback replies (source null, or is_fallback true) carry
+        // no source so the chat never renders a reference element for them.
+        source: res.is_fallback ? null : res.source,
+        isFallback: res.is_fallback,
         time: nowTime(),
       };
       setThreads((prev) => ({ ...prev, [docId]: [...(prev[docId] || []), reply] }));
@@ -713,23 +726,23 @@ export default function Screen() {
                       className="rounded-xl border px-4 py-3"
                       style={{ borderColor: "#E7DECE", backgroundColor: "#FFFFFF" }}
                     >
+                      {/* AC: the verbatim fallback text is shown exactly as
+                          returned — no rewording, no extra claims appended. */}
                       <p className="text-sm leading-relaxed">{m.text}</p>
-                      {m.source ? (
+                      {/* AC-042: a fallback reply (source null, or
+                          is_fallback true) renders no source reference
+                          element at all. AC-040/AC-041: a real source
+                          carries both the document name and its page
+                          (PDF) or chunk (DOCX/TXT) number in one line. */}
+                      {!m.isFallback && m.source && (
                         <p className="mt-3 flex flex-wrap items-center gap-2">
                           <span
                             className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
                             style={{ backgroundColor: "#F6E3D6", color: "#8A4420" }}
                           >
                             <Icons.FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                            Source: {m.source}
+                            Source: {sourceLine(m.source)}
                           </span>
-                          <span className="text-xs" style={{ color: "#6B6256" }}>
-                            {selected ? selected.file_name : ""}
-                          </span>
-                        </p>
-                      ) : (
-                        <p className="mt-3 text-xs" style={{ color: "#6B6256" }}>
-                          No supporting passage was found, so no source is shown.
                         </p>
                       )}
                     </div>

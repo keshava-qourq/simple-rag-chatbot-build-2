@@ -369,7 +369,7 @@ describe("Home screen", () => {
     expect(call).toBe(2);
   });
 
-  it("sends a question, shows a loading indicator, then renders the real answer from the ask endpoint", async () => {
+  it("AC-040: a PDF-sourced answer shows the document name and page number", async () => {
     setupFetch({
       docs: [
         {
@@ -411,8 +411,106 @@ describe("Home screen", () => {
     });
 
     expect(await screen.findByText("Clause 4 requires 30 days' notice.")).toBeInTheDocument();
-    expect(screen.getByText("Source: Page 4")).toBeInTheDocument();
+    expect(screen.getByText("Source: Report.pdf · Page 4")).toBeInTheDocument();
     expect(screen.queryByText(/Retrieving the most relevant passages/)).not.toBeInTheDocument();
+  });
+
+  it("AC-041: a DOCX/TXT-sourced answer shows the document name and chunk number instead of a page", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "notes.txt",
+          file_type: "txt",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockResolvedValue({
+      answer: "The notice period is 30 days.",
+      source: { document_name: "notes.txt", page_number: null, chunk_index: 2 },
+      is_fallback: false,
+      model_configured: true,
+    });
+    render(<Home />);
+    fireEvent.click(await screen.findByText("notes.txt"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "What is the notice period?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByText("The notice period is 30 days.")).toBeInTheDocument();
+    expect(screen.getByText("Source: notes.txt · Chunk 2")).toBeInTheDocument();
+    expect(screen.queryByText(/Page/)).not.toBeInTheDocument();
+  });
+
+  it("AC-042: a fallback reply (is_fallback true, source null) renders no source reference element and shows the verbatim text only", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockResolvedValue({
+      answer: "I couldn't find that information in the uploaded document.",
+      source: null,
+      is_fallback: true,
+      model_configured: true,
+    });
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "What colour is the sky in the document?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(
+      await screen.findByText("I couldn't find that information in the uploaded document."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Page/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Chunk/)).not.toBeInTheDocument();
+  });
+
+  it("AC-042: a fallback reply that still carries a source (is_fallback true) is also rendered without a source reference element", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockResolvedValue({
+      answer: "Some raw chunk content echoed back.",
+      source: { document_name: "Report.pdf", page_number: 1, chunk_index: null },
+      is_fallback: true,
+      model_configured: false,
+    });
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Anything in here?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByText("Some raw chunk content echoed back.")).toBeInTheDocument();
+    expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
   });
 
   it("renders the backend's readable error message instead of a fabricated answer on a failed ask", async () => {

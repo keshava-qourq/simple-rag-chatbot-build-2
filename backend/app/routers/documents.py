@@ -3,11 +3,12 @@
 Owns the five document endpoints the approved API spec commits to: upload,
 library listing, single-document status, deletion and question answering.
 US-001-1 built the data model, local-disk storage and the CRUD surface.
-US-003-1 added extraction and chunking. US-012-1 (this ticket) makes the
-local vector index real: `doc_processor.process_document` now embeds every
-chunk and only then promotes the document to `status="ready"`, and
-`POST /documents/{id}/ask` retrieves from `app.services.retrieval` -- scoped
-to this document only -- instead of unconditionally returning 503.
+US-003-1 added extraction and chunking. US-012-1 made the local vector index
+real. US-013-1 (this ticket) replaces the raw-chunk echo on
+`POST /documents/{id}/ask` with `app.services.answer_gen.generate_answer` --
+a grounded, injection-resistant answer (or the verbatim fallback) built from
+`app.services.retrieval`'s document-scoped chunks, with doc_processor,
+retrieval and answer_gen remaining separate, independently callable modules.
 """
 
 import uuid
@@ -25,15 +26,14 @@ from app.schemas import (
     AskResponse,
     DocumentCreateResponse,
     DocumentStatusResponse,
-    SourceReference,
 )
-from app.services import doc_processor, retrieval, storage
+from app.services import answer_gen, doc_processor, storage
+from app.services.answer_gen import AnswerGenerationError
 from app.services.embedder import EmbeddingError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _SUPPORTED_TYPES_MESSAGE = "Supported types are PDF, DOCX and TXT."
-_NO_MATCH_MESSAGE = "No relevant content was found in this document to answer the question."
 
 
 def _extension_of(filename: str) -> str:
@@ -178,14 +178,16 @@ async def ask_document(
 ) -> AskResponse:
     """Answer a question scoped to one ready document.
 
-    Retrieves `settings.retrieval_top_k` chunks of this document via
-    `app.services.retrieval.search` -- filtered by `document_id` at the
-    query level (AC-035), so a chunk from any other document can never come
-    back -- and grounds the answer in the best match's own text, so it is
-    never fabricated past what the document actually says (AC-036).
-    Embedding or vector-store failure never leaks provider text to the
-    client: `EmbeddingError`'s message is already human-readable and is
-    passed through `redact_secret` before it becomes the 503 detail.
+    All retrieval and generation lives behind `app.services.answer_gen
+    .generate_answer`, which in turn calls `app.services.retrieval.search`
+    -- filtered by `document_id` at the query level (AC-035/AC-045), so a
+    chunk from any other document can never come back -- and grounds the
+    answer in only what was retrieved, returning the verbatim fallback
+    reply whenever the context does not answer the question (including when
+    retrieval is too weak to trust, AC-044). Embedding or model failure
+    never leaks provider text to the client: both `EmbeddingError` and
+    `AnswerGenerationError` carry an already human-readable message, passed
+    through `redact_secret` before it becomes the 503 detail.
     """
     if not body.question.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is empty")
@@ -201,29 +203,21 @@ async def ask_document(
         )
 
     try:
-        chunks = retrieval.search(db, document_id, body.question, settings)
+        result = answer_gen.generate_answer(db, document, body.question, settings)
     except EmbeddingError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=redact_secret(exc.message, settings),
         ) from exc
+    except AnswerGenerationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=redact_secret(exc.message, settings),
+        ) from exc
 
-    if not chunks:
-        return AskResponse(
-            answer=_NO_MATCH_MESSAGE,
-            source=None,
-            is_fallback=True,
-            model_configured=settings.llm_configured,
-        )
-
-    top = chunks[0]
     return AskResponse(
-        answer=top.content.strip(),
-        source=SourceReference(
-            document_name=document.file_name,
-            page_number=top.page_number,
-            chunk_index=top.chunk_index,
-        ),
-        is_fallback=True,
+        answer=result.answer,
+        source=result.source,
+        is_fallback=result.is_fallback,
         model_configured=settings.llm_configured,
     )
