@@ -36,12 +36,9 @@ UNREACHABLE_MESSAGE = (
     "connectivity, then try again."
 )
 AUTH_MESSAGE = (
-    "The embedding provider rejected the configured API key. Check EMBEDDING_API_KEY "
-    "and try again."
+    "The embedding provider rejected the configured API key. Check EMBEDDING_API_KEY and try again."
 )
-GENERIC_FAILURE_MESSAGE = (
-    "The embedding model could not process this document. Try again later."
-)
+GENERIC_FAILURE_MESSAGE = "The embedding model could not process this document. Try again later."
 
 
 class EmbeddingError(Exception):
