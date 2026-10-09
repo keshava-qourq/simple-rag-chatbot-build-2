@@ -2,10 +2,16 @@
 
 Owns the five document endpoints the approved API spec commits to: upload,
 library listing, single-document status, deletion and question answering.
-This ticket (US-001-1) implements the data model, local-disk storage and the
-CRUD surface -- upload, list, get-one and delete. Extraction, chunking and
-embedding are US-002-1's job: a freshly uploaded document is persisted with
-status "processing" and left there.
+US-001-1 built the data model, local-disk storage and the CRUD surface.
+US-003-1 (this ticket) adds extraction and chunking: `POST /documents` now
+runs `app.services.doc_processor.process_document` synchronously before it
+returns, so the row it creates is never left at `status="processing"` once
+the request completes -- it has already settled at `"ready"` or `"failed"`
+with a readable `error_message`. This router only orchestrates (validate,
+save bytes, persist the row, hand off to `doc_processor`); extraction,
+chunking and the failure-message taxonomy all live in
+`app/services/doc_processor.py`. Embedding, the vector index and
+`POST /documents/{id}/ask` are US-003-2's job and are left untouched here.
 """
 
 import uuid
@@ -24,7 +30,7 @@ from app.schemas import (
     DocumentCreateResponse,
     DocumentStatusResponse,
 )
-from app.services import storage
+from app.services import doc_processor, storage
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -60,12 +66,16 @@ async def upload_document(
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> DocumentCreateResponse:
-    """Validate, persist to disk and record a new document.
+    """Validate, persist to disk, record and process a new document.
 
     Size and extension are both checked before a single byte is written to
     disk (AC-002): an unsupported extension is rejected without ever reading
     the body, and an oversized body is rejected before `storage.save_file`
-    is called.
+    is called. Once the row and file exist, extraction and chunking run
+    synchronously via `doc_processor.process_document`, which always leaves
+    the row at `status="ready"` or `status="failed"` -- with its error
+    message and an orphaned file cleaned up on failure -- before this
+    handler returns.
     """
     name = file.filename or "upload"
     extension = _extension_of(name)
@@ -93,6 +103,9 @@ async def upload_document(
 
     db.add(document)
     db.commit()
+    db.refresh(document)
+
+    doc_processor.process_document(document, content, db, settings)
     db.refresh(document)
 
     return DocumentCreateResponse(
