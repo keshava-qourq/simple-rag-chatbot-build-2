@@ -2,25 +2,49 @@
 
 Owns the five document endpoints the approved API spec commits to: upload,
 library listing, single-document status, deletion and question answering.
-Each handler below is routed, typed and documented in the OpenAPI schema the
-frontend is built against -- but the behaviour behind it (`doc_processor`,
-`retrieval`, `answer_gen`, and the datastore queries that back them) is the
-development sprint's work, implemented ticket by ticket, not this scaffold's.
+This ticket (US-001-1) implements the data model, local-disk storage and the
+CRUD surface -- upload, list, get-one and delete. Extraction, chunking and
+embedding are US-002-1's job: a freshly uploaded document is persisted with
+status "processing" and left there.
 """
 
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
+from app.config import Settings, get_settings
+from app.database import get_db
+from app.models import Chunk, Document
 from app.schemas import (
+    SUPPORTED_DOCUMENT_TYPES,
     AskRequest,
     AskResponse,
     DocumentCreateResponse,
     DocumentStatusResponse,
 )
+from app.services import storage
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+_SUPPORTED_TYPES_MESSAGE = "Supported types are PDF, DOCX and TXT."
+
+
+def _extension_of(filename: str) -> str:
+    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _to_status_response(document: Document, chunk_count: int) -> DocumentStatusResponse:
+    return DocumentStatusResponse(
+        id=document.id,
+        file_name=document.file_name,
+        file_type=document.file_type,
+        status=document.status,
+        error_message=document.error_message,
+        chunk_count=chunk_count,
+        created_at=document.created_at,
+    )
 
 
 @router.post(
@@ -28,36 +52,67 @@ router = APIRouter(prefix="/documents", tags=["documents"])
     response_model=DocumentCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        400: {"description": "Unsupported, empty or corrupt file"},
-        415: {"description": "Unsupported file type"},
+        400: {"description": "Unsupported, empty or oversized file"},
     },
 )
-async def upload_document(file: Annotated[UploadFile, File()]) -> DocumentCreateResponse:
-    """Accept a PDF, DOCX or TXT file and queue it for processing.
+async def upload_document(
+    file: Annotated[UploadFile, File()],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> DocumentCreateResponse:
+    """Validate, persist to disk and record a new document.
 
-    Stub: type/size validation, per-format extraction, chunking, embedding
-    and storage are the approved `doc_processor` function's job, and
-    persisting the resulting document row is the datastore's -- neither is
-    implemented here yet.
+    Size and extension are both checked before a single byte is written to
+    disk (AC-002): an unsupported extension is rejected without ever reading
+    the body, and an oversized body is rejected before `storage.save_file`
+    is called.
     """
     name = file.filename or "upload"
-    suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    return DocumentCreateResponse(
+    extension = _extension_of(name)
+    if extension not in SUPPORTED_DOCUMENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type '{extension or 'unknown'}'. {_SUPPORTED_TYPES_MESSAGE}",
+        )
+
+    content = await file.read()
+    max_bytes = int(settings.max_upload_mb * 1024 * 1024)
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File exceeds the {settings.max_upload_mb}MB upload limit.",
+        )
+
+    document = Document(
         id=uuid.uuid4(),
         file_name=name,
-        file_type=suffix,
+        file_type=extension,
         status="processing",
+    )
+    storage.save_file(document.id, extension, content)
+
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    return DocumentCreateResponse(
+        id=document.id,
+        file_name=document.file_name,
+        file_type=document.file_type,
+        status=document.status,
+        created_at=document.created_at,
     )
 
 
 @router.get("", response_model=list[DocumentStatusResponse])
-async def list_documents() -> list[DocumentStatusResponse]:
-    """List every document in the library.
-
-    Stub: an empty library is the correct response before the datastore is
-    wired to this handler and any document has been persisted.
-    """
-    return []
+async def list_documents(db: Annotated[Session, Depends(get_db)]) -> list[DocumentStatusResponse]:
+    """List every document in the library (AC-003: an empty library is a
+    normal 200, not an error)."""
+    documents = db.query(Document).order_by(Document.created_at).all()
+    return [
+        _to_status_response(doc, db.query(Chunk).filter(Chunk.document_id == doc.id).count())
+        for doc in documents
+    ]
 
 
 @router.get(
@@ -65,13 +120,16 @@ async def list_documents() -> list[DocumentStatusResponse]:
     response_model=DocumentStatusResponse,
     responses={404: {"description": "Document not found"}},
 )
-async def get_document(document_id: uuid.UUID) -> DocumentStatusResponse:
-    """Get a single document's current status and error detail.
+async def get_document(
+    document_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]
+) -> DocumentStatusResponse:
+    """Get a single document's current status, error detail and chunk count."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    Stub: with no datastore query behind it yet, every id is correctly not
-    found.
-    """
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    chunk_count = db.query(Chunk).filter(Chunk.document_id == document.id).count()
+    return _to_status_response(document, chunk_count)
 
 
 @router.delete(
@@ -79,15 +137,17 @@ async def get_document(document_id: uuid.UUID) -> DocumentStatusResponse:
     status_code=status.HTTP_204_NO_CONTENT,
     responses={404: {"description": "Document not found"}},
 )
-async def delete_document(document_id: uuid.UUID) -> None:
-    """Permanently remove a document and cascade-delete its chunks and
-    embeddings.
+async def delete_document(
+    document_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]
+) -> None:
+    """Permanently remove a document, its chunks/embeddings and its file."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    Stub: the cascade itself is modelled at the schema level in
-    `app.models.Chunk` (`ondelete="CASCADE"`); issuing the delete is the
-    development sprint's work.
-    """
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    storage.delete_file(document.id, document.file_type)
+    db.delete(document)
+    db.commit()
 
 
 @router.post(

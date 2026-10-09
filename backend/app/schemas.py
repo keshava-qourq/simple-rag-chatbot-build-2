@@ -10,6 +10,7 @@ handler behind it is implemented.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +31,7 @@ class DocumentCreateResponse(BaseModel):
     file_name: str
     file_type: str
     status: str
+    created_at: datetime
 
 
 class DocumentStatusResponse(BaseModel):
@@ -40,6 +42,8 @@ class DocumentStatusResponse(BaseModel):
     file_type: str
     status: str
     error_message: str | None = None
+    chunk_count: int
+    created_at: datetime
 
 
 class AskRequest(BaseModel):
