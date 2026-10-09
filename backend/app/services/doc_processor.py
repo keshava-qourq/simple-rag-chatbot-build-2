@@ -1,10 +1,11 @@
-"""Document extraction and chunking pipeline (US-003-1).
+"""Document extraction, chunking and embedding pipeline (US-003-1, US-003-2).
 
 Runs synchronously inside `POST /documents` -- this scaffold has no
 background job queue, so by the time the handler returns, a document has
 already settled at `status="ready"` or `status="failed"`. It is never left
 "processing" past the end of the request, and no half-processed document (a
-row with no chunks, or a partial set of chunks) is ever visible to a caller.
+row with no chunks, or a partial set of chunks, or chunks with no embedding)
+is ever visible to a caller.
 
 Chosen failure rule (documented here because AC-014 allows either "removed"
 or "marked failed"): a failed upload's `documents` row is **kept**, not
@@ -12,16 +13,19 @@ deleted, with `status="failed"` and a human-readable `error_message` -- so a
 failed attempt stays visible on `GET /documents` and `GET /documents/{id}`
 instead of vanishing silently. Its on-disk file is always removed, though: a
 failed document never has a reachable file behind it. Any chunks that might
-have been written before the failure was detected are rolled back first, so
-a document is always either fully chunked or has zero chunks, never a
-partial set.
+have been written before the failure was detected -- extraction, chunking,
+*or* embedding -- are rolled back first, so a document is always either
+fully chunked-and-embedded or has zero chunk rows, never a partial set
+(AC-010).
 
 Every error message here is deliberately written for a human reading
-`GET /documents/{id}`, never a parser's raw exception text or traceback --
-AC-015 and AC-016 both specifically forbid surfacing that. Any exception text
-that is logged for debugging is passed through `app.config.redact_secret`
-first, on the off chance a provider/parser error happens to echo a
-configured key back.
+`GET /documents/{id}`, never a parser's or provider's raw exception text or
+traceback -- AC-015 and AC-016 both specifically forbid surfacing that. Any
+exception text that is logged for debugging is passed through
+`app.config.redact_secret` first, on the off chance a provider/parser error
+happens to echo a configured key back; `embedder.embed_texts` already does
+this itself for every embedding-provider failure (AC: "secrets are never
+present in error_message or logs").
 """
 
 import logging
@@ -33,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, redact_secret
 from app.models import Chunk, Document
-from app.services import storage
+from app.services import embedder, storage
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +153,15 @@ def process_document(
     db: Session,
     settings: Settings,
 ) -> None:
-    """Extract, chunk and persist, or mark the document failed.
+    """Extract, chunk, embed and persist, or mark the document failed.
 
     Always leaves `document` at `status="ready"` or `status="failed"`, with
     `db` committed, before returning -- never partway, and never still
-    "processing" once the call finishes.
+    "processing" once the call finishes. A chunk row is only ever written
+    with its embedding already computed (AC-008): embedding happens before
+    any `Chunk` is added to the session, so a failure there (including no
+    embedding model configured at all) leaves zero chunk rows, not partial
+    ones (AC-010).
     """
     try:
         if not content or not content.strip():
@@ -171,7 +179,15 @@ def process_document(
                 raise DocumentProcessingError(SCANNED_PDF_MESSAGE)
             raise DocumentProcessingError(EMPTY_FILE_MESSAGE)
 
-        for index, (text, page_number) in enumerate(chunk_tuples):
+        texts = [text for text, _ in chunk_tuples]
+        try:
+            vectors = embedder.embed_texts(texts, settings)
+        except embedder.EmbeddingError as exc:
+            raise DocumentProcessingError(exc.message) from exc
+
+        for index, ((text, page_number), vector) in enumerate(
+            zip(chunk_tuples, vectors, strict=True)
+        ):
             db.add(
                 Chunk(
                     id=uuid.uuid4(),
@@ -179,6 +195,7 @@ def process_document(
                     chunk_index=index,
                     page_number=page_number,
                     content=text,
+                    embedding=vector,
                 )
             )
         document.status = "ready"
