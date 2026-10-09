@@ -78,9 +78,7 @@ def test_call_llm_receives_the_verbatim_retrieved_chunk_text_and_nothing_fabrica
     monkeypatch.setattr(answer_gen, "_call_llm", _fake_call_llm)
     settings = Settings(llm_api_key="test-llm-key", embedding_api_key="test-embed-key")
 
-    result = answer_gen.generate_answer(
-        db, document, "How long is the warranty?", settings
-    )
+    result = answer_gen.generate_answer(db, document, "How long is the warranty?", settings)
 
     assert captured["chunk_texts"] == [stored_text]
     assert captured["question"] == "How long is the warranty?"

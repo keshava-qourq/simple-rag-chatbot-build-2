@@ -85,9 +85,7 @@ _SYSTEM_PROMPT = (
 )
 
 GENERIC_FAILURE_MESSAGE = "The answer model could not process this question. Try again later."
-AUTH_MESSAGE = (
-    "The LLM provider rejected the configured API key. Check LLM_API_KEY and try again."
-)
+AUTH_MESSAGE = "The LLM provider rejected the configured API key. Check LLM_API_KEY and try again."
 UNREACHABLE_MESSAGE = (
     "The LLM provider could not be reached. Check LLM_BASE_URL and network "
     "connectivity, then try again."

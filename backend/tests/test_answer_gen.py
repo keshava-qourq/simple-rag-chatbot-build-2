@@ -172,7 +172,9 @@ def test_generate_answer_model_fallback_reply_yields_null_source_and_exact_messa
     monkeypatch.setattr(answer_gen, "_call_llm", lambda q, chunks, settings: FALLBACK_MESSAGE)
     settings = Settings(llm_api_key="test-llm-key", embedding_api_key="test-embed-key")
 
-    result = answer_gen.generate_answer(db, document, "What is the airspeed of a swallow?", settings)
+    result = answer_gen.generate_answer(
+        db, document, "What is the airspeed of a swallow?", settings
+    )
 
     assert result.answer == "I couldn't find that information in the uploaded document."
     assert result.source is None
