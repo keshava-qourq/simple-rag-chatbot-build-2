@@ -23,7 +23,11 @@ async function mockBackend(
   const state = { docs: options.initialDocs ? [...options.initialDocs] : [] };
 
   await page.route("**/config/status", async (route: Route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CONFIG_RESPONSE) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(CONFIG_RESPONSE),
+    });
   });
 
   await page.route("**/documents", async (route: Route) => {
@@ -78,7 +82,9 @@ test("fresh page: upload is the primary call to action and the library shows its
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
-test("selecting a supported file adds it to the list with a processing status", async ({ page }) => {
+test("selecting a supported file adds it to the list with a processing status", async ({
+  page,
+}) => {
   await mockBackend(page, { initialDocs: [] });
   await page.goto("/");
   await expect(page.getByText("Your shelf is empty")).toBeVisible();
@@ -126,7 +132,18 @@ test("the page loads straight to the full interface with no login, registration 
   await expect(page.getByRole("heading", { name: "Reading Room" })).toBeVisible();
   await expect(page.getByLabel("Choose a file")).toBeVisible();
 
-  for (const term of ["log in", "log out", "sign in", "sign up", "register", "password", "subscribe", "checkout", "payment", "credit card"]) {
+  for (const term of [
+    "log in",
+    "log out",
+    "sign in",
+    "sign up",
+    "register",
+    "password",
+    "subscribe",
+    "checkout",
+    "payment",
+    "credit card",
+  ]) {
     await expect(page.getByText(new RegExp(term, "i"))).toHaveCount(0);
   }
 });
@@ -150,7 +167,14 @@ test("no UI control for chunk size, overlap or retrieval count exists anywhere o
   await page.goto("/");
   await expect(page.getByText("Report.pdf")).toBeVisible();
 
-  for (const term of ["chunk size", "overlap", "retrieval count", "top k", "top-k", "chunks to retrieve"]) {
+  for (const term of [
+    "chunk size",
+    "overlap",
+    "retrieval count",
+    "top k",
+    "top-k",
+    "chunks to retrieve",
+  ]) {
     await expect(page.getByText(new RegExp(term, "i"))).toHaveCount(0);
   }
 

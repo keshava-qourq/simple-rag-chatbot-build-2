@@ -483,8 +483,7 @@ export default function Screen() {
 
                         {doc.status === "failed" && (
                           <p className="mt-2 text-xs leading-relaxed" style={{ color: "#8A3524" }}>
-                            {doc.error_message || "Processing failed."} Not available for
-                            questions.
+                            {doc.error_message || "Processing failed."} Not available for questions.
                           </p>
                         )}
                       </div>

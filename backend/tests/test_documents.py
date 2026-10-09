@@ -87,7 +87,9 @@ def test_upload_pdf_and_docx_extensions_are_accepted() -> None:
 def test_unsupported_extension_is_rejected_with_readable_message() -> None:
     """AC-002: an unsupported extension is a 400 naming PDF, DOCX and TXT,
     with no record and no file created."""
-    response = _upload("malware.exe", b"not a real document", content_type="application/x-msdownload")
+    response = _upload(
+        "malware.exe", b"not a real document", content_type="application/x-msdownload"
+    )
 
     assert response.status_code == 400
     detail = response.json()["detail"]

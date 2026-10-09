@@ -105,7 +105,9 @@ describe("Home screen", () => {
     fireEvent.change(input, { target: { files: [file] } });
 
     expect(
-      await screen.findByText(/is not a supported file type\. Reading Room accepts PDF, DOCX and TXT files only\./),
+      await screen.findByText(
+        /is not a supported file type\. Reading Room accepts PDF, DOCX and TXT files only\./,
+      ),
     ).toBeInTheDocument();
     expect(mockedApiUpload).not.toHaveBeenCalled();
   });

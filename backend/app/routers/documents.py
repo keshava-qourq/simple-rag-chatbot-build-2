@@ -137,9 +137,7 @@ async def get_document(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={404: {"description": "Document not found"}},
 )
-async def delete_document(
-    document_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]
-) -> None:
+async def delete_document(document_id: uuid.UUID, db: Annotated[Session, Depends(get_db)]) -> None:
     """Permanently remove a document, its chunks/embeddings and its file."""
     document = db.get(Document, document_id)
     if document is None:
