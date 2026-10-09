@@ -7,8 +7,9 @@ source), AC-039 (doc_processor, retrieval and answer_gen are separate,
 independently callable modules), AC-040/AC-041 (page number for a PDF
 source, chunk index for DOCX/TXT), AC-044 (a relevance threshold, not mere
 emptiness, triggers the fallback), AC-045 (retrieval stays scoped to the
-selected document id), AC-046/AC-047/AC-048 (prompt-injection resistance)
-and the no-leak contract on a model failure.
+selected document id), AC-046/AC-047/AC-048 (prompt-injection resistance),
+AC-050 (the no-model notice, not a fabricated or verbatim-chunk answer) and
+the no-leak contract on a model failure.
 
 The embedder (`retrieval.embed_texts`) and the chat model
 (`answer_gen._call_llm`) are always stubbed via monkeypatch -- this suite
@@ -28,7 +29,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Chunk, Document
 from app.services import answer_gen, retrieval, storage
-from app.services.answer_gen import FALLBACK_MESSAGE, AnswerGenerationError
+from app.services.answer_gen import FALLBACK_MESSAGE, NO_MODEL_MESSAGE, AnswerGenerationError
 
 TEST_DB_URL = "sqlite:///./test_answer_gen.db"
 engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -229,9 +230,16 @@ def test_generate_answer_below_relevance_threshold_returns_fallback_without_call
     db.close()
 
 
-def test_generate_answer_no_llm_configured_uses_existing_readable_no_model_path(
+# --- no-model behaviour (US-017-1 / AC-050) ---------------------------------
+
+
+def test_generate_answer_no_llm_configured_returns_plain_notice_never_chunk_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """AC-050: with no LLM configured but a relevant chunk retrieved, the
+    answer is the plain `NO_MODEL_MESSAGE` notice -- never the chunk's own
+    text, never a generated or simulated answer -- with a null source and
+    the model never called."""
     db = TestingSessionLocal()
     document = _make_ready_document(db)
     _add_chunk(db, document.id, 0, "the capital of France is Paris", [1.0, 0.0], page_number=None)
@@ -243,10 +251,36 @@ def test_generate_answer_no_llm_configured_uses_existing_readable_no_model_path(
 
     result = answer_gen.generate_answer(db, document, "What is the capital of France?", settings)
 
-    assert "Paris" in result.answer
+    assert result.answer == NO_MODEL_MESSAGE
+    assert "Paris" not in result.answer
     assert result.is_fallback is True
-    assert result.source is not None
+    assert result.source is None
     assert not calls, "the model must never be called when no LLM key is configured"
+    db.close()
+
+
+def test_generate_answer_no_llm_configured_still_runs_retrieval_and_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-049: retrieval and embedding still run with no LLM configured --
+    the embedder is invoked exactly as it would be with a model configured."""
+    db = TestingSessionLocal()
+    document = _make_ready_document(db)
+    _add_chunk(db, document.id, 0, "some content", [1.0, 0.0])
+
+    embed_calls = []
+
+    def _embed(texts, settings):
+        embed_calls.append(texts)
+        return [[1.0, 0.0]]
+
+    monkeypatch.setattr(retrieval, "embed_texts", _embed)
+    settings = Settings(embedding_api_key="test-embed-key")  # no llm_api_key
+
+    result = answer_gen.generate_answer(db, document, "anything?", settings)
+
+    assert embed_calls, "the embedder must still be called with no LLM configured"
+    assert result.answer == NO_MODEL_MESSAGE
     db.close()
 
 
@@ -481,5 +515,67 @@ def test_ask_endpoint_llm_failure_returns_503_without_leaking_the_key(
 
     assert response.status_code == 503
     assert secret not in response.text
+
+    get_settings.cache_clear()
+
+
+def test_ask_endpoint_no_model_configured_returns_plain_notice_with_model_configured_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-050: `POST /documents/{id}/ask` with no LLM configured returns the
+    plain no-model notice, `model_configured: false`, and never a generated,
+    simulated or verbatim-chunk answer."""
+    db = TestingSessionLocal()
+    document = _make_ready_document(db, "notes.txt", "txt")
+    _add_chunk(db, document.id, 0, "the capital of France is Paris", [1.0, 0.0])
+    db.close()
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts, settings: [[1.0, 0.0]])
+    get_settings.cache_clear()
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embed-key")
+
+    response = client.post(
+        f"/documents/{document.id}/ask", json={"question": "What is the capital of France?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == NO_MODEL_MESSAGE
+    assert "Paris" not in body["answer"]
+    assert body["model_configured"] is False
+    assert body["source"] is None
+    assert body["is_fallback"] is True
+
+    get_settings.cache_clear()
+
+
+def test_ask_endpoint_model_configured_true_after_restart_no_notice_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-051: once LLM_PROVIDER/LLM_API_KEY are set, the endpoint generates
+    normally, `model_configured` is true, and the no-model notice is absent."""
+    db = TestingSessionLocal()
+    document = _make_ready_document(db, "notes.txt", "txt")
+    _add_chunk(db, document.id, 0, "the capital of France is Paris", [1.0, 0.0])
+    db.close()
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts, settings: [[1.0, 0.0]])
+    monkeypatch.setattr(answer_gen, "_call_llm", lambda q, chunks, settings: "Paris.")
+    get_settings.cache_clear()
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "test-llm-key")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embed-key")
+
+    response = client.post(
+        f"/documents/{document.id}/ask", json={"question": "What is the capital of France?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model_configured"] is True
+    assert NO_MODEL_MESSAGE not in body["answer"]
+    assert body["answer"] == "Paris."
 
     get_settings.cache_clear()

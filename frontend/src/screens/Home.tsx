@@ -24,7 +24,15 @@ const STATUS_STYLE: Record<DocumentStatus, { label: string; bg: string; fg: stri
 
 const POLL_MS = 3000;
 
-type MessageRole = "user" | "assistant" | "notice";
+// AC-050: the plain, fixed notice shown whenever the backend reports
+// `model_configured: false` for an `ask` call. It never incorporates
+// `AskResponse.answer` -- that field may still carry fallback/chunk-echo
+// text from the backend, and the UI must not surface it as an answer while
+// no model is configured.
+const NO_MODEL_NOTICE_TEXT =
+  "Answer generation requires a configured local or API-backed model. Ask again once one is set up.";
+
+type MessageRole = "user" | "assistant" | "notice" | "no-model";
 
 interface Message {
   id: string;
@@ -302,16 +310,27 @@ export default function Screen() {
     setPending({ docId });
     try {
       const res = await askDocument(docId, q);
-      const reply: Message = {
-        id: `m_${Date.now()}_a`,
-        role: "assistant",
-        text: res.answer,
-        // AC-042: fallback replies (source null, or is_fallback true) carry
-        // no source so the chat never renders a reference element for them.
-        source: res.is_fallback ? null : res.source,
-        isFallback: res.is_fallback,
-        time: nowTime(),
-      };
+      // AC-050/AC-049: when the backend reports no model is configured, the
+      // chat gets a plain, fixed notice -- never `res.answer`, which may
+      // still be fabricated or chunk-echo text from the backend. Source
+      // references never attach to this notice either.
+      const reply: Message = !res.model_configured
+        ? {
+            id: `m_${Date.now()}_nm`,
+            role: "no-model",
+            text: NO_MODEL_NOTICE_TEXT,
+            time: nowTime(),
+          }
+        : {
+            id: `m_${Date.now()}_a`,
+            role: "assistant",
+            text: res.answer,
+            // AC-042: fallback replies (source null, or is_fallback true) carry
+            // no source so the chat never renders a reference element for them.
+            source: res.is_fallback ? null : res.source,
+            isFallback: res.is_fallback,
+            time: nowTime(),
+          };
       setThreads((prev) => ({ ...prev, [docId]: [...(prev[docId] || []), reply] }));
     } catch (err) {
       const notice: Message = {
@@ -717,6 +736,22 @@ export default function Screen() {
                     <Icons.AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                     <div>
                       <p className="font-medium">Answer unavailable</p>
+                      <p className="mt-1">{m.text}</p>
+                    </div>
+                  </div>
+                ) : m.role === "no-model" ? (
+                  // AC-050: a plain notice, styled distinctly from a normal
+                  // assistant answer (dashed border, muted tone, no source
+                  // reference) -- never a fabricated or chunk-echo answer.
+                  <div
+                    key={m.id}
+                    role="status"
+                    className="flex max-w-[92%] items-start gap-3 rounded-xl border border-dashed px-4 py-3 text-sm leading-relaxed"
+                    style={{ borderColor: "#C8BCA1", backgroundColor: "#F2ECDC", color: "#5E5238" }}
+                  >
+                    <Icons.AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                    <div>
+                      <p className="font-medium">No answer model configured</p>
                       <p className="mt-1">{m.text}</p>
                     </div>
                   </div>

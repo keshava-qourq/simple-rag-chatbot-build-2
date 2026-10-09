@@ -1,7 +1,8 @@
-"""Answer generation (US-013-1): the component between retrieval and the
-client. Given a ready document, a question and already-loaded settings, it
-returns a grounded answer (or the verbatim fallback) plus the source
-reference the UI shows next to it.
+"""Answer generation (US-013-1, updated by US-017-1): the component between
+retrieval and the client. Given a ready document, a question and
+already-loaded settings, it returns a grounded answer (or the verbatim
+fallback, or the no-model notice) plus the source reference the UI shows
+next to it.
 
 Kept deliberately independent of `app.services.retrieval` and
 `app.services.doc_processor` (AC-039): this module only ever calls
@@ -32,6 +33,20 @@ Grounding and prompt-injection resistance
 * A relevance threshold screens out weak retrieval before the model is
   ever called (AC-044): "retrieval found rows, but none of them are
   actually relevant" is treated the same as "retrieval found no rows".
+
+No-model behaviour (US-017-1 / AC-050)
+---------------------------------------
+Retrieval and embedding still run exactly as they do with a model
+configured -- so the embedder's own health (and any `EmbeddingError`) is
+reported the same way whether or not an LLM is configured (AC-049). Only
+the final step changes: when no LLM is configured
+(`settings.llm_configured` is `False`), this module never generates,
+simulates, or echoes a document chunk's raw text as if it were an answer.
+It returns the single module-level `NO_MODEL_MESSAGE` constant instead --
+never interpolated or reworded -- with `source=None` and `is_fallback=True`.
+The router separately reports `model_configured` from
+`settings.llm_configured`, so the client always has both the plain notice
+and the boolean signal.
 """
 
 import logging
@@ -56,6 +71,16 @@ logger = logging.getLogger(__name__)
 # A single module-level constant: never interpolated, translated or
 # reworded anywhere this is used (AC-043).
 FALLBACK_MESSAGE = "I couldn't find that information in the uploaded document."
+
+# A single module-level constant: never interpolated, translated or
+# reworded anywhere this is used (AC-050). Returned whenever no LLM is
+# configured, instead of fabricating, simulating, or echoing a chunk's raw
+# text as an "answer".
+NO_MODEL_MESSAGE = (
+    "Answer generation requires a configured local or API-backed model. "
+    "Set LLM_PROVIDER and LLM_API_KEY (see .env.example) and restart the "
+    "backend to enable it."
+)
 
 # Below this cosine similarity, the best retrieved chunk is not a real
 # match -- the fallback is returned instead of an answer built on weak
@@ -171,7 +196,9 @@ def generate_answer(
     only route to chunk content, keeping doc_processor, retrieval and
     answer_gen independently callable (AC-039). `retrieval.search`'s own
     `EmbeddingError` is not caught here -- the router decides how to turn
-    that into a response.
+    that into a response. Retrieval always runs, with or without an LLM
+    configured, so the embedder's health is reported identically either
+    way (AC-049).
     """
     chunks = retrieval.search(db, document.id, question, settings)
     if not chunks:
@@ -184,14 +211,15 @@ def generate_answer(
     if best_similarity < RELEVANCE_THRESHOLD:
         return AnswerResult(answer=FALLBACK_MESSAGE, source=None, is_fallback=True)
 
+    if not settings.llm_configured:
+        # No model configured: never generate, simulate, or echo a chunk's
+        # raw text as an "answer" (AC-050). The plain notice stands alone,
+        # with no source attached, since it is not grounded in any one
+        # chunk.
+        return AnswerResult(answer=NO_MODEL_MESSAGE, source=None, is_fallback=True)
+
     top = chunks[0]
     source = _build_source(document, top)
-
-    if not settings.llm_configured:
-        # Existing readable no-model path: nothing can be generated, so the
-        # best chunk's own text is returned verbatim rather than fabricated
-        # or crashed on (do not fabricate, do not crash).
-        return AnswerResult(answer=top.content.strip(), source=source, is_fallback=True)
 
     raw_answer = _call_llm(question, chunks, settings)
     if raw_answer.strip() == FALLBACK_MESSAGE:

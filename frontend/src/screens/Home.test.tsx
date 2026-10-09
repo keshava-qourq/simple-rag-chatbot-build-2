@@ -509,7 +509,15 @@ describe("Home screen", () => {
     fireEvent.change(input, { target: { value: "Anything in here?" } });
     fireEvent.submit(input.closest("form") as HTMLFormElement);
 
-    expect(await screen.findByText("Some raw chunk content echoed back.")).toBeInTheDocument();
+    // AC-050: model_configured is false, so the UI shows the no-model
+    // notice rather than the raw chunk-echo `answer` text, and never a
+    // source reference alongside it.
+    expect(
+      await screen.findByText(
+        "Answer generation requires a configured local or API-backed model. Ask again once one is set up.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Some raw chunk content echoed back.")).not.toBeInTheDocument();
     expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
   });
 
@@ -712,5 +720,133 @@ describe("Home screen", () => {
     fireEvent.click(screen.getByText("Second.txt"));
     expect(await screen.findByText("Question for B")).toBeInTheDocument();
     expect(screen.getByText("Answer for B")).toBeInTheDocument();
+  });
+
+  it("AC-050: a model_configured=false ask shows the plain no-model notice, never the backend's answer text, and carries no source", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+      config: CONFIG_MISSING,
+    });
+    mockedAskDocument.mockResolvedValue({
+      answer: "This text is a fabricated or chunk-echo pseudo-answer.",
+      source: { document_name: "Report.pdf", page_number: 1, chunk_index: null },
+      is_fallback: false,
+      model_configured: false,
+    });
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "What does clause 4 say?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    const notice = await screen.findByText("No answer model configured");
+    expect(notice).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Answer generation requires a configured local or API-backed model. Ask again once one is set up.",
+      ),
+    ).toBeInTheDocument();
+    // AC-050: the fabricated/chunk-echo text never appears anywhere in the
+    // chat, and no source reference element is rendered for this notice.
+    expect(
+      screen.queryByText("This text is a fabricated or chunk-echo pseudo-answer."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
+  });
+
+  it("AC-051: when llm_configured is true, no no-model notice appears anywhere and answers render normally with their source", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+      config: CONFIG_OK,
+    });
+    mockedAskDocument.mockResolvedValue({
+      answer: "Clause 4 requires 30 days' notice.",
+      source: { document_name: "Report.pdf", page_number: 4, chunk_index: null },
+      is_fallback: false,
+      model_configured: true,
+    });
+    render(<Home />);
+    expect(
+      screen.queryByText(
+        "Answer generation requires a configured local or API-backed model. Ask again once one is set up.",
+      ),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByText("Report.pdf"));
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "What does clause 4 say?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByText("Clause 4 requires 30 days' notice.")).toBeInTheDocument();
+    expect(screen.getByText("Source: Report.pdf · Page 4")).toBeInTheDocument();
+    expect(screen.queryByText("No answer model configured")).not.toBeInTheDocument();
+  });
+
+  it("AC-049: with no model configured, upload, selection and deletion remain fully usable", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+      config: CONFIG_MISSING,
+    });
+    mockedApiUpload.mockResolvedValue({
+      id: "doc-2",
+      file_name: "notes.txt",
+      file_type: "txt",
+      status: "processing",
+      created_at: "2026-10-09T00:00:00Z",
+    } as never);
+    render(<Home />);
+    await screen.findByText("Report.pdf");
+
+    // Upload still works.
+    const fileInput = screen.getByLabelText("Choose a file") as HTMLInputElement;
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+    expect(screen.getByText("Processing")).toBeInTheDocument();
+
+    // Selection still works.
+    const reportBtn = screen.getByText("Report.pdf").closest("button") as HTMLButtonElement;
+    fireEvent.click(reportBtn);
+    await waitFor(() => expect(reportBtn).toHaveAttribute("aria-current", "true"));
+
+    // Deletion still works.
+    fireEvent.click(screen.getByLabelText("Remove Report.pdf from the shelf"));
+    expect(await screen.findByText("Remove this document?")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Delete permanently"));
+    await waitFor(() =>
+      expect(mockedApiFetch).toHaveBeenCalledWith("/documents/doc-1", { method: "DELETE" }),
+    );
+    await waitFor(() => expect(screen.queryByText("Report.pdf")).not.toBeInTheDocument());
   });
 });
