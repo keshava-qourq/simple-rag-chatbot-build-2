@@ -3,15 +3,11 @@
 Owns the five document endpoints the approved API spec commits to: upload,
 library listing, single-document status, deletion and question answering.
 US-001-1 built the data model, local-disk storage and the CRUD surface.
-US-003-1 (this ticket) adds extraction and chunking: `POST /documents` now
-runs `app.services.doc_processor.process_document` synchronously before it
-returns, so the row it creates is never left at `status="processing"` once
-the request completes -- it has already settled at `"ready"` or `"failed"`
-with a readable `error_message`. This router only orchestrates (validate,
-save bytes, persist the row, hand off to `doc_processor`); extraction,
-chunking and the failure-message taxonomy all live in
-`app/services/doc_processor.py`. Embedding, the vector index and
-`POST /documents/{id}/ask` are US-003-2's job and are left untouched here.
+US-003-1 added extraction and chunking. US-012-1 (this ticket) makes the
+local vector index real: `doc_processor.process_document` now embeds every
+chunk and only then promotes the document to `status="ready"`, and
+`POST /documents/{id}/ask` retrieves from `app.services.retrieval` -- scoped
+to this document only -- instead of unconditionally returning 503.
 """
 
 import uuid
@@ -20,7 +16,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, redact_secret
 from app.database import get_db
 from app.models import Chunk, Document
 from app.schemas import (
@@ -29,12 +25,15 @@ from app.schemas import (
     AskResponse,
     DocumentCreateResponse,
     DocumentStatusResponse,
+    SourceReference,
 )
-from app.services import doc_processor, storage
+from app.services import doc_processor, retrieval, storage
+from app.services.embedder import EmbeddingError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _SUPPORTED_TYPES_MESSAGE = "Supported types are PDF, DOCX and TXT."
+_NO_MATCH_MESSAGE = "No relevant content was found in this document to answer the question."
 
 
 def _extension_of(filename: str) -> str:
@@ -71,11 +70,11 @@ async def upload_document(
     Size and extension are both checked before a single byte is written to
     disk (AC-002): an unsupported extension is rejected without ever reading
     the body, and an oversized body is rejected before `storage.save_file`
-    is called. Once the row and file exist, extraction and chunking run
-    synchronously via `doc_processor.process_document`, which always leaves
-    the row at `status="ready"` or `status="failed"` -- with its error
-    message and an orphaned file cleaned up on failure -- before this
-    handler returns.
+    is called. Once the row and file exist, extraction, chunking and
+    embedding run synchronously via `doc_processor.process_document`, which
+    always leaves the row at `status="ready"` or `status="failed"` -- with
+    its error message and an orphaned file cleaned up on failure -- before
+    this handler returns.
     """
     name = file.filename or "upload"
     extension = _extension_of(name)
@@ -166,21 +165,65 @@ async def delete_document(document_id: uuid.UUID, db: Annotated[Session, Depends
     response_model=AskResponse,
     responses={
         400: {"description": "Empty or whitespace-only question"},
+        404: {"description": "Document not found"},
         409: {"description": "Document is not ready"},
         503: {"description": "Retrieval or model failure"},
     },
 )
-async def ask_document(document_id: uuid.UUID, body: AskRequest) -> AskResponse:
+async def ask_document(
+    document_id: uuid.UUID,
+    body: AskRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AskResponse:
     """Answer a question scoped to one ready document.
 
-    Stub: retrieval restricted to this document and grounded generation are
-    the approved `retrieval` and `answer_gen` functions' job, not implemented
-    here yet. The one real check kept here is the spec's own 400 for an
-    empty or whitespace-only question, since that needs no component at all.
+    Retrieves `settings.retrieval_top_k` chunks of this document via
+    `app.services.retrieval.search` -- filtered by `document_id` at the
+    query level (AC-035), so a chunk from any other document can never come
+    back -- and grounds the answer in the best match's own text, so it is
+    never fabricated past what the document actually says (AC-036).
+    Embedding or vector-store failure never leaks provider text to the
+    client: `EmbeddingError`'s message is already human-readable and is
+    passed through `redact_secret` before it becomes the 503 detail.
     """
     if not body.question.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is empty")
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Retrieval and answer generation are not implemented yet.",
+
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if document.status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is not ready yet. Wait for processing to finish.",
+        )
+
+    try:
+        chunks = retrieval.search(db, document_id, body.question, settings)
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=redact_secret(exc.message, settings),
+        ) from exc
+
+    if not chunks:
+        return AskResponse(
+            answer=_NO_MATCH_MESSAGE,
+            source=None,
+            is_fallback=True,
+            model_configured=settings.llm_configured,
+        )
+
+    top = chunks[0]
+    return AskResponse(
+        answer=top.content.strip(),
+        source=SourceReference(
+            document_name=document.file_name,
+            page_number=top.page_number,
+            chunk_index=top.chunk_index,
+        ),
+        is_fallback=True,
+        model_configured=settings.llm_configured,
     )

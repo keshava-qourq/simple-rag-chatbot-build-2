@@ -8,16 +8,53 @@ before it creates the schema.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Uuid, func
+from pgvector.sqlalchemy import Vector as PGVector
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, TypeDecorator, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
-__all__ = ["Base", "Document", "Chunk"]
+__all__ = ["Base", "Document", "Chunk", "VectorType"]
+
+
+class VectorType(TypeDecorator):
+    """An embedding column, with the storage format chosen at the engine
+    level -- not by a try/except at call time.
+
+    On Postgres this delegates to `pgvector`'s native `VECTOR` column, so a
+    real deployment gets pgvector's own storage and indexing. Everywhere
+    else (SQLite, the default `DATABASE_URL`, has no vector column type at
+    all) it falls back to a JSON-encoded float list in a plain `TEXT`
+    column. `app.services.retrieval` computes cosine similarity in Python
+    either way, so this choice only ever affects how a vector is stored on
+    disk, never how a search is carried out.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PGVector())
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return value
+        return json.dumps(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return value
+        return json.loads(value)
 
 
 class Document(Base):
@@ -33,9 +70,7 @@ class Document(Base):
     # hold whichever value `doc_processor` writes.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="processing")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     chunks: Mapped[list[Chunk]] = relationship(
         back_populates="document",
@@ -63,8 +98,8 @@ class Chunk(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # Dimension intentionally left unspecified: the embedding model is an
-    # environment choice (`Settings.llm_embedding_model`), not a schema
-    # constant, and pgvector accepts a column declared without a fixed one.
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
+    # environment choice (`Settings.embedding_model`), not a schema
+    # constant. See `VectorType` for the Postgres/SQLite storage split.
+    embedding: Mapped[list[float] | None] = mapped_column(VectorType(), nullable=True)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
