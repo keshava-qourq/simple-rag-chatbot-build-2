@@ -1,0 +1,54 @@
+{
+  "key": {
+    "app_design_id": "e5d85b5d-1f0e-41ad-aa09-5f13a1a811e6",
+    "app_design_version": 1,
+    "architecture_document_id": "1e3bc0d4-93fd-4671-81fa-546ea97c8844",
+    "architecture_version": 1
+  },
+  "outcome": "prepared",
+  "packages": [
+    {
+      "ecosystem": "pypi",
+      "installed_version": "6.20.0",
+      "name": "pypdf",
+      "status": "installed",
+      "version": ">=4.0"
+    },
+    {
+      "ecosystem": "pypi",
+      "installed_version": "1.2.0",
+      "name": "python-docx",
+      "status": "installed",
+      "version": ">=1.1"
+    },
+    {
+      "ecosystem": "pypi",
+      "installed_version": "3.27.0",
+      "name": "openai",
+      "status": "installed",
+      "version": ">=1.0"
+    },
+    {
+      "ecosystem": "pypi",
+      "installed_version": "0.5.1",
+      "name": "pgvector",
+      "status": "installed",
+      "version": ">=0.3"
+    },
+    {
+      "ecosystem": "pypi",
+      "installed_version": "0.0.32",
+      "name": "python-multipart",
+      "status": "installed",
+      "version": ">=0.0.9"
+    },
+    {
+      "ecosystem": "pypi",
+      "installed_version": "2.15.0",
+      "name": "pydantic-settings",
+      "status": "installed",
+      "version": ">=2.0"
+    }
+  ],
+  "prepared_by_run": "43b66573-7292-408b-a73f-a01026235292"
+}

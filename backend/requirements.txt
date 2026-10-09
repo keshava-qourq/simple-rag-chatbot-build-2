@@ -13,3 +13,12 @@ pytest>=8.3
 # back to show on the development dashboard.
 pytest-cov>=5.0
 ruff>=0.6
+
+# BEGIN QUORQ ARCHITECTURE PACKAGES
+openai>=1.0
+pgvector>=0.3
+pydantic-settings>=2.0
+pypdf>=4.0
+python-docx>=1.1
+python-multipart>=0.0.9
+# END QUORQ ARCHITECTURE PACKAGES

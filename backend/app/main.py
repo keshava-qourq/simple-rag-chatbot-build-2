@@ -1,9 +1,10 @@
 """Application entrypoint.
 
 Generated from the approved architecture: one router per component that owns
-endpoints, one route per endpoint the API spec declares. Every generated route
-is a stub that returns a typed placeholder, so the service starts, serves its
-OpenAPI document and passes its tests before a single handler is implemented.
+endpoints, one route per endpoint the API spec declares. Most generated
+routes are stubs that return a typed placeholder, so the service starts,
+serves its OpenAPI document and passes its tests before a single handler's
+real behaviour is implemented.
 """
 
 import os
@@ -13,10 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import models  # noqa: F401 -- imported so the tables register before create_all
 from app.database import Base, engine
+from app.routers import config as config_router
+from app.routers import documents
 
 app = FastAPI(
-    title="Simple RAG Chatbot \u2014 Build (2)",
-    description="Simple RAG Chatbot \u2014 Build Instructions",
+    title="Simple RAG Chatbot — Build (2)",
+    description="Simple RAG Chatbot — Build Instructions",
     version="0.1.0",
 )
 
@@ -37,6 +40,9 @@ app.add_middleware(
 # The scaffold ships no migrations, so the tables are created from the models on
 # startup. Replace this with Alembic before anything holds data worth keeping.
 Base.metadata.create_all(bind=engine)
+
+app.include_router(documents.router)
+app.include_router(config_router.router)
 
 
 @app.get("/health")

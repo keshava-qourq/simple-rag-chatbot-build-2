@@ -1,20 +1,84 @@
 """Pydantic request and response models.
 
-One pair per entity in the approved data model, plus the placeholder every
-generated route returns until it has been implemented.
+One schema per body the approved API spec commits to, so every router
+imports a name that already matches the committed contract instead of each
+ticket inventing its own shape. Where a handler is still a stub, the shape is
+the contract that is fixed now; the value returned is a placeholder until the
+handler behind it is implemented.
 """
 
-from pydantic import BaseModel
+from __future__ import annotations
+
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# The architecture's three accepted upload formats (doc_processor), also
+# returned verbatim by `GET /config/status` for the upload UI.
+SUPPORTED_DOCUMENT_TYPES: list[str] = ["pdf", "docx", "txt"]
 
 
-class StubResponse(BaseModel):
-    """What a generated route returns until someone implements it.
+class ErrorResponse(BaseModel):
+    """The `{error}` body every 4xx/5xx in the API spec returns."""
 
-    A stub that returns a typed body rather than raising keeps the service
-    startable and its OpenAPI document complete, so the frontend can be built
-    against the agreed shape while the handlers are still being written.
+    error: str
+
+
+class DocumentCreateResponse(BaseModel):
+    """201/202 body for `POST /documents`."""
+
+    id: uuid.UUID
+    file_name: str
+    file_type: str
+    status: str
+
+
+class DocumentStatusResponse(BaseModel):
+    """Body for `GET /documents` (as a list) and `GET /documents/{id}`."""
+
+    id: uuid.UUID
+    file_name: str
+    file_type: str
+    status: str
+    error_message: str | None = None
+
+
+class AskRequest(BaseModel):
+    """Body for `POST /documents/{id}/ask`."""
+
+    question: str
+
+
+class SourceReference(BaseModel):
+    """The `source` object attached to a grounded answer.
+
+    Exactly one of `page_number` (PDF) or `chunk_index` (DOCX/TXT) is set,
+    matching the chunk the answer was grounded in.
     """
 
-    endpoint: str
-    status: str = "not_implemented"
-    detail: str = "Scaffolded from the approved API spec; no behaviour yet."
+    document_name: str
+    page_number: int | None = None
+    chunk_index: int | None = None
+
+
+class AskResponse(BaseModel):
+    """200 body for `POST /documents/{id}/ask`."""
+
+    # The spec's field is literally `model_configured`; pydantic only warns
+    # about its default "model_" protected namespace here, it does not
+    # reject it. Disabling the check is correct, not a workaround.
+    model_config = ConfigDict(protected_namespaces=())
+
+    answer: str
+    source: SourceReference | None = None
+    is_fallback: bool
+    model_configured: bool
+
+
+class ConfigStatusResponse(BaseModel):
+    """200 body for `GET /config/status`."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_configured: bool
+    supported_types: list[str] = Field(default_factory=lambda: list(SUPPORTED_DOCUMENT_TYPES))
