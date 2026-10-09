@@ -157,9 +157,7 @@ test("AC-013: a failed document shows its specific reason and keeps questions di
 
   await expect(page.getByText("Scanned.pdf")).toBeVisible();
   await expect(page.getByText("Failed")).toBeVisible();
-  await expect(
-    page.getByText("Could not extract text: the PDF is encrypted."),
-  ).toBeVisible();
+  await expect(page.getByText("Could not extract text: the PDF is encrypted.")).toBeVisible();
 
   // A failed row is not selectable, so no document ends up selected and the
   // question controls stay disabled.
