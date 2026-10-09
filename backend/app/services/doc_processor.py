@@ -1,43 +1,48 @@
-"""Document extraction, chunking and embedding pipeline (US-003-1, US-003-2).
+"""Document extraction and chunking (US-003-1).
 
 Runs synchronously inside `POST /documents` -- this scaffold has no
 background job queue, so by the time the handler returns, a document has
-already settled at `status="ready"` or `status="failed"`. It is never left
-"processing" past the end of the request, and no half-processed document (a
-row with no chunks, or a partial set of chunks, or chunks with no embedding)
-is ever visible to a caller.
+already been fully validated: either its text extracted and split into
+chunks without error, or it has settled at `status="failed"` with a
+human-readable `error_message` and its on-disk file removed. It is never
+left "processing" after a *failure*; the on-disk file is always removed in
+that case too.
+
+Embedding the chunks, writing `Chunk` rows and promoting the document to
+`status="ready"` are **US-003-2's job**, not this one's -- this ticket is
+scoped to extraction and chunking only (see the ticket's own constraint:
+"Do not touch embedding, the vector index or POST /documents/{id}/ask").
+Accordingly, a document that extracts and chunks cleanly is left at
+`status="processing"` (its status at creation) with zero `Chunk` rows: a
+`Chunk` is only ever written once it has an embedding (AC-008 in US-003-2),
+so no `Chunk` row is written here at all. A document is only ever visible
+with chunks once US-003-2 has embedded every one of them -- never with a
+partial set, and never with one that has no embedding (AC-010).
 
 Chosen failure rule (documented here because AC-014 allows either "removed"
 or "marked failed"): a failed upload's `documents` row is **kept**, not
 deleted, with `status="failed"` and a human-readable `error_message` -- so a
 failed attempt stays visible on `GET /documents` and `GET /documents/{id}`
 instead of vanishing silently. Its on-disk file is always removed, though: a
-failed document never has a reachable file behind it. Any chunks that might
-have been written before the failure was detected -- extraction, chunking,
-*or* embedding -- are rolled back first, so a document is always either
-fully chunked-and-embedded or has zero chunk rows, never a partial set
-(AC-010).
+failed document never has a reachable file behind it.
 
 Every error message here is deliberately written for a human reading
-`GET /documents/{id}`, never a parser's or provider's raw exception text or
-traceback -- AC-015 and AC-016 both specifically forbid surfacing that. Any
-exception text that is logged for debugging is passed through
-`app.config.redact_secret` first, on the off chance a provider/parser error
-happens to echo a configured key back; `embedder.embed_texts` already does
-this itself for every embedding-provider failure (AC: "secrets are never
-present in error_message or logs").
+`GET /documents/{id}`, never a parser's raw exception text or traceback --
+AC-015 and AC-016 both specifically forbid surfacing that. Any exception
+text that is logged for debugging is passed through `app.config.redact_secret`
+first, on the off chance a parser error happens to echo a configured key
+back.
 """
 
 import logging
-import uuid
 from dataclasses import dataclass
 from io import BytesIO
 
 from sqlalchemy.orm import Session
 
 from app.config import Settings, redact_secret
-from app.models import Chunk, Document
-from app.services import embedder, storage
+from app.models import Document
+from app.services import storage
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +134,12 @@ def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     return chunks
 
 
-def _build_chunks(pages: list[ExtractedPage], settings: Settings) -> list[tuple[str, int | None]]:
-    """Returns `(content, page_number)` tuples, in document order."""
+def build_chunks(pages: list[ExtractedPage], settings: Settings) -> list[tuple[str, int | None]]:
+    """Returns `(content, page_number)` tuples, in document order, each
+    carrying its future `chunk_index` as its position in this list. Exposed
+    (not prefixed `_`) so US-003-2's embedding stage can reuse it rather than
+    re-split the text itself.
+    """
     chunks: list[tuple[str, int | None]] = []
     for page in pages:
         for piece in _chunk_text(page.text, settings.chunk_size, settings.chunk_overlap):
@@ -153,15 +162,16 @@ def process_document(
     db: Session,
     settings: Settings,
 ) -> None:
-    """Extract, chunk, embed and persist, or mark the document failed.
+    """Extract and chunk, or mark the document failed.
 
-    Always leaves `document` at `status="ready"` or `status="failed"`, with
-    `db` committed, before returning -- never partway, and never still
-    "processing" once the call finishes. A chunk row is only ever written
-    with its embedding already computed (AC-008): embedding happens before
-    any `Chunk` is added to the session, so a failure there (including no
-    embedding model configured at all) leaves zero chunk rows, not partial
-    ones (AC-010).
+    Validates that the upload has readable text and can be split into at
+    least one non-empty chunk, surfacing only the human-readable taxonomy of
+    errors (AC-014/015/016) and never a raw parser exception. On success the
+    document is left exactly as it was handed in (`status="processing"`,
+    no chunk rows) for US-003-2 to pick up and embed; on any failure it is
+    left at `status="failed"` with a readable `error_message`, its on-disk
+    file removed, and `db` already committed -- never still "processing"
+    once this call returns.
     """
     try:
         if not content or not content.strip():
@@ -172,35 +182,16 @@ def process_document(
             raise DocumentProcessingError(CORRUPT_FILE_MESSAGE)
 
         pages = extractor(content)
-        chunk_tuples = _build_chunks(pages, settings)
+        chunk_tuples = build_chunks(pages, settings)
 
         if not chunk_tuples:
             if document.file_type == "pdf":
                 raise DocumentProcessingError(SCANNED_PDF_MESSAGE)
             raise DocumentProcessingError(EMPTY_FILE_MESSAGE)
 
-        texts = [text for text, _ in chunk_tuples]
-        try:
-            vectors = embedder.embed_texts(texts, settings)
-        except embedder.EmbeddingError as exc:
-            raise DocumentProcessingError(exc.message) from exc
-
-        for index, ((text, page_number), vector) in enumerate(
-            zip(chunk_tuples, vectors, strict=True)
-        ):
-            db.add(
-                Chunk(
-                    id=uuid.uuid4(),
-                    document_id=document.id,
-                    chunk_index=index,
-                    page_number=page_number,
-                    content=text,
-                    embedding=vector,
-                )
-            )
-        document.status = "ready"
-        document.error_message = None
-        db.commit()
+        # Extraction and chunking succeeded. Chunk rows and the "ready"
+        # status are written only once US-003-2 embeds every chunk; nothing
+        # further happens here.
     except DocumentProcessingError as exc:
         _mark_failed(document, exc.message, db, settings)
     except Exception:  # pragma: no cover - unexpected failure safety net
