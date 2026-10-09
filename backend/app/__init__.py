@@ -1,0 +1,1 @@
+"""The generated FastAPI application."""
