@@ -9,6 +9,42 @@
 // fallback is the local backend so a bare `npm run dev` still points somewhere real.
 export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+/**
+ * Typed document contract, mirrored from backend/app/schemas.py.
+ *
+ * `DocumentStatusResponse` is the shape of `GET /documents` (as a list) and
+ * `GET /documents/{id}`. `DocumentCreateResponse` is the 202 body of
+ * `POST /documents`: it deliberately has no `error_message`/`chunk_count`
+ * because processing hasn't produced either yet.
+ */
+export type DocumentStatus = "ready" | "processing" | "failed";
+
+export interface DocumentStatusResponse {
+  id: string;
+  file_name: string;
+  file_type: string;
+  status: DocumentStatus;
+  error_message: string | null;
+  chunk_count: number;
+  created_at: string;
+}
+
+export interface DocumentCreateResponse {
+  id: string;
+  file_name: string;
+  file_type: string;
+  status: DocumentStatus;
+  created_at: string;
+}
+
+export interface ConfigStatusResponse {
+  llm_configured: boolean;
+  embedding_configured: boolean;
+  llm_model: string | null;
+  embedding_model: string | null;
+  issues: string[];
+}
+
 async function readErrorMessage(response: Response, fallback: string): Promise<string> {
   try {
     const body = await response.json();
@@ -53,4 +89,30 @@ export async function apiUpload<T>(path: string, file: File): Promise<T> {
     throw new Error(message);
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
+}
+
+/** Typed call surface for the document library, per contract:
+ * GET /documents -> DocumentStatusResponse[]
+ * POST /documents -> 202 DocumentCreateResponse
+ * GET /documents/{id} -> DocumentStatusResponse
+ * DELETE /documents/{id} -> 204
+ */
+export function fetchDocuments(): Promise<DocumentStatusResponse[]> {
+  return apiFetch<DocumentStatusResponse[]>("/documents");
+}
+
+export function fetchDocument(id: string): Promise<DocumentStatusResponse> {
+  return apiFetch<DocumentStatusResponse>(`/documents/${id}`);
+}
+
+export function uploadDocument(file: File): Promise<DocumentCreateResponse> {
+  return apiUpload<DocumentCreateResponse>("/documents", file);
+}
+
+export function deleteDocument(id: string): Promise<void> {
+  return apiFetch<void>(`/documents/${id}`, { method: "DELETE" });
+}
+
+export function fetchConfigStatus(): Promise<ConfigStatusResponse> {
+  return apiFetch<ConfigStatusResponse>("/config/status");
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch, apiUpload } from "@/lib/api";
@@ -57,6 +57,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("Home screen", () => {
@@ -133,6 +134,39 @@ describe("Home screen", () => {
     expect(screen.getByText("Processing")).toBeInTheDocument();
   });
 
+  it("leaves an existing document unchanged when a second upload completes", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "First.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 4,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedApiUpload.mockResolvedValue({
+      id: "doc-2",
+      file_name: "Second.txt",
+      file_type: "txt",
+      status: "processing",
+      created_at: "2026-10-09T00:00:00Z",
+    } as never);
+    render(<Home />);
+    await screen.findByText("First.pdf");
+
+    const input = screen.getByLabelText("Choose a file") as HTMLInputElement;
+    const file = new File(["hello"], "Second.txt", { type: "text/plain" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(await screen.findByText("Second.txt")).toBeInTheDocument();
+    expect(screen.getByText("First.pdf")).toBeInTheDocument();
+    expect(screen.getByText("4 chunks indexed")).toBeInTheDocument();
+  });
+
   it("deletes a document after confirmation", async () => {
     setupFetch({
       docs: [
@@ -179,5 +213,155 @@ describe("Home screen", () => {
 
     expect(await screen.findByText(/No text could be extracted\./)).toBeInTheDocument();
     expect(screen.getByText("Failed")).toBeInTheDocument();
+  });
+
+  it("lists two ready documents and marks only the selected one with aria-current", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "First.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+        {
+          id: "doc-2",
+          file_name: "Second.txt",
+          file_type: "txt",
+          status: "ready",
+          error_message: null,
+          chunk_count: 5,
+          created_at: "2026-10-02T00:00:00Z",
+        },
+      ],
+    });
+    render(<Home />);
+    await screen.findByText("First.pdf");
+    await screen.findByText("Second.txt");
+
+    const firstBtn = screen.getByText("First.pdf").closest("button") as HTMLButtonElement;
+    const secondBtn = screen.getByText("Second.txt").closest("button") as HTMLButtonElement;
+
+    expect(firstBtn).not.toHaveAttribute("aria-current");
+    expect(secondBtn).not.toHaveAttribute("aria-current");
+
+    fireEvent.click(secondBtn);
+
+    await waitFor(() => expect(secondBtn).toHaveAttribute("aria-current", "true"));
+    expect(firstBtn).not.toHaveAttribute("aria-current");
+  });
+
+  it("renders a ready document without NaN/undefined when chunk_count is missing", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-3",
+          file_name: "Fresh.txt",
+          file_type: "txt",
+          status: "ready",
+          error_message: null,
+          chunk_count: undefined,
+          created_at: "2026-10-09T00:00:00Z",
+        },
+      ],
+    });
+    render(<Home />);
+
+    expect(await screen.findByText("Fresh.txt")).toBeInTheDocument();
+    expect(screen.getByText("0 chunks indexed")).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+  });
+
+  it("shows a backend 4xx upload error as dismissible without disturbing the library", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "First.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedApiUpload.mockRejectedValue(new Error("File exceeds the 20MB upload limit."));
+    render(<Home />);
+    await screen.findByText("First.pdf");
+    fireEvent.click(screen.getByText("First.pdf"));
+
+    const input = screen.getByLabelText("Choose a file") as HTMLInputElement;
+    const file = new File(["x"], "big.pdf", { type: "application/pdf" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("File exceeds the 20MB upload limit.");
+
+    fireEvent.click(screen.getByLabelText("Dismiss upload error"));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // The selected document and the rest of the library are untouched: the
+    // name still appears both in the shelf row and the now-selected chat
+    // header, so assert presence rather than a single unique match.
+    expect(screen.getAllByText("First.pdf").length).toBeGreaterThan(0);
+  });
+
+  it("stops polling once no document is processing, and resumes after a new upload", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/documents" && (!init || init.method === undefined)) {
+        call += 1;
+        if (call === 1) {
+          return [
+            {
+              id: "doc-1",
+              file_name: "Draft.txt",
+              file_type: "txt",
+              status: "processing",
+              error_message: null,
+              chunk_count: 0,
+              created_at: "2026-10-09T00:00:00Z",
+            },
+          ] as never;
+        }
+        return [
+          {
+            id: "doc-1",
+            file_name: "Draft.txt",
+            file_type: "txt",
+            status: "ready",
+            error_message: null,
+            chunk_count: 3,
+            created_at: "2026-10-09T00:00:00Z",
+          },
+        ] as never;
+      }
+      if (path === "/config/status") return CONFIG_OK as never;
+      throw new Error(`unexpected apiFetch call: ${path}`);
+    });
+
+    render(<Home />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Processing")).toBeInTheDocument();
+    expect(call).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(call).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(call).toBe(2);
   });
 });

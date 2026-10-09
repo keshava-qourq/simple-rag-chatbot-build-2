@@ -1,20 +1,23 @@
-// @ts-nocheck -- generated from the approved design under its JS runtime contract; not hand-written TypeScript.
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import React from "react";
 
 import * as UI from "@/lib/ui";
 import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
 import { apiFetch, apiUpload } from "@/lib/api";
+import type {
+  ConfigStatusResponse,
+  DocumentCreateResponse,
+  DocumentStatus,
+  DocumentStatusResponse,
+} from "@/lib/api";
 
 const { Input, Label } = UI;
-const { Plus, X, FileText, Package, Trash, ArrowRight, AlertCircle, CheckCircle } = Icons;
 
 const FALLBACK = "I couldn't find that information in the uploaded document.";
 
-const TYPE_LABEL = { pdf: "PDF", docx: "DOCX", txt: "TXT" };
+const TYPE_LABEL: Record<string, string> = { pdf: "PDF", docx: "DOCX", txt: "TXT" };
 
-const STATUS_STYLE = {
+const STATUS_STYLE: Record<DocumentStatus, { label: string; bg: string; fg: string }> = {
   ready: { label: "Ready", bg: "#E3EDE8", fg: "#285146" },
   processing: { label: "Processing", bg: "#EFE7D6", fg: "#5E5238" },
   failed: { label: "Failed", bg: "#F6E1DA", fg: "#8A3524" },
@@ -22,15 +25,35 @@ const STATUS_STYLE = {
 
 const POLL_MS = 3000;
 
-const Btn = ({ kind = "quiet", className = "", style = {}, children, ...rest }) => {
+type MessageRole = "user" | "assistant" | "notice";
+
+interface Message {
+  id: string;
+  role: MessageRole;
+  text: string;
+  time: string;
+  source?: string | null;
+}
+
+interface Pending {
+  docId: string;
+  question: string;
+}
+
+type BtnKind = "primary" | "quiet" | "plain";
+
+const Btn = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { kind?: BtnKind }
+>(function Btn({ kind = "quiet", className = "", style = {}, children, ...rest }, ref) {
   const base =
     "inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-45 disabled:cursor-not-allowed";
-  const kinds = {
+  const kinds: Record<BtnKind, string> = {
     primary: "px-4 py-2 text-white hover:opacity-90",
     quiet: "px-3 py-2 border hover:bg-white",
     plain: "px-2 py-1 hover:underline",
   };
-  const kindStyle =
+  const kindStyle: React.CSSProperties =
     kind === "primary"
       ? { backgroundColor: "#2F5D50" }
       : kind === "quiet"
@@ -38,6 +61,7 @@ const Btn = ({ kind = "quiet", className = "", style = {}, children, ...rest }) 
         : { color: "#2F5D50" };
   return (
     <button
+      ref={ref}
       type={rest.type || "button"}
       className={`${base} ${kinds[kind]} ${className}`}
       style={{ ...kindStyle, ...style }}
@@ -46,16 +70,16 @@ const Btn = ({ kind = "quiet", className = "", style = {}, children, ...rest }) 
       {children}
     </button>
   );
-};
+});
 
-function formatDate(iso) {
+function formatDate(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-function validateFile(file) {
+function validateFile(file: File): string | null {
   const lower = file.name.toLowerCase();
   const dot = lower.lastIndexOf(".");
   const ext = dot >= 0 ? lower.slice(dot + 1) : "";
@@ -69,61 +93,106 @@ function validateFile(file) {
   return null;
 }
 
+/** A freshly-created document (from `POST /documents`) does not carry
+ * `error_message`/`chunk_count` yet; fill both in so the optimistic row
+ * never renders `undefined`/`NaN`. */
+function toLibraryRow(created: DocumentCreateResponse): DocumentStatusResponse {
+  return {
+    id: created.id,
+    file_name: created.file_name,
+    file_type: created.file_type,
+    status: created.status,
+    error_message: null,
+    chunk_count: 0,
+    created_at: created.created_at,
+  };
+}
+
 export default function Screen() {
-  const [docs, setDocs] = React.useState([]);
+  const [docs, setDocs] = React.useState<DocumentStatusResponse[]>([]);
   const [docsLoading, setDocsLoading] = React.useState(true);
-  const [docsError, setDocsError] = React.useState(null);
-  const [threads, setThreads] = React.useState({});
-  const [selectedId, setSelectedId] = React.useState(null);
+  const [docsError, setDocsError] = React.useState<string | null>(null);
+  const [threads, setThreads] = React.useState<Record<string, Message[]>>({});
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [question, setQuestion] = React.useState("");
-  const [pending, setPending] = React.useState(null);
-  const [uploadError, setUploadError] = React.useState(null);
+  const [pending, setPending] = React.useState<Pending | null>(null);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
   const [uploading, setUploading] = React.useState(false);
-  const [deleteTarget, setDeleteTarget] = React.useState(null);
-  const [deleteError, setDeleteError] = React.useState(null);
-  const [config, setConfig] = React.useState(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<DocumentStatusResponse | null>(null);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const [config, setConfig] = React.useState<ConfigStatusResponse | null>(null);
   const [configLoading, setConfigLoading] = React.useState(true);
 
-  const confirmRef = React.useRef(null);
-  const fileRef = React.useRef(null);
-  const logRef = React.useRef(null);
+  const confirmRef = React.useRef<HTMLButtonElement | null>(null);
+  const fileRef = React.useRef<HTMLInputElement | null>(null);
+  const logRef = React.useRef<HTMLDivElement | null>(null);
+
+  const mountedRef = React.useRef(true);
+  const pollTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const sortedDocs = React.useMemo(
-    () => [...docs].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
+    () =>
+      [...docs].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
     [docs],
   );
   const selected = docs.find((d) => d.id === selectedId) || null;
   const thread = (selected && threads[selected.id]) || [];
   const canAsk = !!selected && selected.status === "ready" && !pending;
 
-  // Load the document library, then keep polling so a "processing" row can
-  // move to ready/failed without a manual refresh (AC-001).
-  React.useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const data = await apiFetch("/documents");
-        if (cancelled) return;
-        setDocs(data);
-        setDocsError(null);
-      } catch (err) {
-        if (!cancelled) setDocsError(err?.message || "Could not load the document library.");
-      } finally {
-        if (!cancelled) setDocsLoading(false);
-      }
+  function clearPollTimer() {
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
-    load();
-    const interval = setInterval(load, POLL_MS);
+  }
+
+  // Polling only runs while a document is still processing (AC: polling
+  // stops once the library has settled, and resumes after a fresh upload
+  // reintroduces a "processing" row).
+  function schedulePollIfNeeded(data: DocumentStatusResponse[]) {
+    clearPollTimer();
+    if (data.some((d) => d.status === "processing")) {
+      pollTimerRef.current = setTimeout(() => {
+        refreshDocuments();
+      }, POLL_MS);
+    }
+  }
+
+  async function refreshDocuments() {
+    try {
+      const data = await apiFetch<DocumentStatusResponse[]>("/documents");
+      if (!mountedRef.current) return;
+      setDocs(data);
+      setDocsError(null);
+      schedulePollIfNeeded(data);
+    } catch (err) {
+      if (mountedRef.current) {
+        setDocsError(err instanceof Error ? err.message : "Could not load the document library.");
+      }
+    } finally {
+      if (mountedRef.current) setDocsLoading(false);
+    }
+  }
+
+  // Initial load of the document library.
+  React.useEffect(() => {
+    mountedRef.current = true;
+    refreshDocuments();
     return () => {
-      cancelled = true;
-      clearInterval(interval);
+      mountedRef.current = false;
+      clearPollTimer();
     };
+    // Runs once on mount; refreshDocuments/clearPollTimer are stable across
+    // the component's lifetime in behaviour even though they're redefined
+    // each render, and re-running this effect on every render would create
+    // a parallel polling loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Configuration banner reflects the backend, not local state.
   React.useEffect(() => {
     let cancelled = false;
-    apiFetch("/config/status")
+    apiFetch<ConfigStatusResponse>("/config/status")
       .then((data) => {
         if (!cancelled) setConfig(data);
       })
@@ -146,17 +215,18 @@ export default function Screen() {
     const t = setTimeout(() => {
       setThreads((prev) => {
         const current = prev[pending.docId] || [];
-        return { ...prev, [pending.docId]: [...current, buildReply(pending)] };
+        return { ...prev, [pending.docId]: [...current, buildReply()] };
       });
       setPending(null);
     }, 1200);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending, config]);
 
   // Close the confirmation dialog with Escape.
   React.useEffect(() => {
     if (!deleteTarget) return;
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setDeleteTarget(null);
     };
     window.addEventListener("keydown", onKey);
@@ -168,11 +238,11 @@ export default function Screen() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [thread.length, pending]);
 
-  function nowTime() {
+  function nowTime(): string {
     return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-  function buildReply(p) {
+  function buildReply(): Message {
     if (config && !config.llm_configured) {
       return {
         id: `m_${Date.now()}`,
@@ -190,7 +260,7 @@ export default function Screen() {
     };
   }
 
-  async function handleFile(file) {
+  async function handleFile(file: File | null | undefined) {
     if (!file) return;
     setUploadError(null);
     const err = validateFile(file);
@@ -200,36 +270,43 @@ export default function Screen() {
     }
     setUploading(true);
     try {
-      const created = await apiUpload("/documents", file);
-      setDocs((prev) => [created, ...prev.filter((d) => d.id !== created.id)]);
+      const created = await apiUpload<DocumentCreateResponse>("/documents", file);
+      const row = toLibraryRow(created);
+      setDocs((prev) => {
+        const next = [row, ...prev.filter((d) => d.id !== row.id)];
+        schedulePollIfNeeded(next);
+        return next;
+      });
     } catch (e) {
-      setUploadError(e?.message || `“${file.name}” could not be uploaded. Please try again.`);
+      setUploadError(
+        e instanceof Error ? e.message : `“${file.name}” could not be uploaded. Please try again.`,
+      );
     } finally {
       setUploading(false);
     }
   }
 
-  function onFileChange(e) {
+  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     handleFile(file);
   }
 
-  function onDrop(e) {
+  function onDrop(e: React.DragEvent<HTMLElement>) {
     e.preventDefault();
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     handleFile(file);
   }
 
-  function onDragOver(e) {
+  function onDragOver(e: React.DragEvent<HTMLElement>) {
     e.preventDefault();
   }
 
-  function onSend(e) {
+  function onSend(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const q = question.trim();
     if (!q || !selected || selected.status !== "ready" || pending) return;
-    const msg = { id: `m_${Date.now()}_u`, role: "user", text: q, time: nowTime() };
+    const msg: Message = { id: `m_${Date.now()}_u`, role: "user", text: q, time: nowTime() };
     setThreads((prev) => ({ ...prev, [selected.id]: [...(prev[selected.id] || []), msg] }));
     setQuestion("");
     setPending({ docId: selected.id, question: q });
@@ -237,10 +314,11 @@ export default function Screen() {
 
   async function confirmDelete() {
     const target = deleteTarget;
+    if (!target) return;
     setDeleteTarget(null);
     setDeleteError(null);
     try {
-      await apiFetch(`/documents/${target.id}`, { method: "DELETE" });
+      await apiFetch<void>(`/documents/${target.id}`, { method: "DELETE" });
       setDocs((prev) => prev.filter((d) => d.id !== target.id));
       setThreads((prev) => {
         const next = { ...prev };
@@ -249,7 +327,7 @@ export default function Screen() {
       });
       if (selectedId === target.id) setSelectedId(null);
     } catch (e) {
-      setDeleteError(e?.message || `Could not delete “${target.file_name}”.`);
+      setDeleteError(e instanceof Error ? e.message : `Could not delete “${target.file_name}”.`);
     }
   }
 
@@ -414,6 +492,7 @@ export default function Screen() {
                   const st = STATUS_STYLE[doc.status] || STATUS_STYLE.processing;
                   const isSelected = doc.id === selectedId;
                   const selectable = doc.status === "ready";
+                  const chunkCount = doc.chunk_count ?? 0;
                   return (
                     <li key={doc.id}>
                       <div
@@ -471,7 +550,7 @@ export default function Screen() {
                           </span>
                           {doc.status === "ready" && (
                             <span className="text-xs" style={{ color: "#6B6256" }}>
-                              {doc.chunk_count} chunk{doc.chunk_count === 1 ? "" : "s"} indexed
+                              {chunkCount} chunk{chunkCount === 1 ? "" : "s"} indexed
                             </span>
                           )}
                           {doc.status === "processing" && (
