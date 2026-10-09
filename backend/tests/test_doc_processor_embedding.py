@@ -70,10 +70,7 @@ def test_process_document_embeds_chunks_and_promotes_to_ready(
     assert document.error_message is None
 
     chunks = (
-        db.query(Chunk)
-        .filter(Chunk.document_id == document.id)
-        .order_by(Chunk.chunk_index)
-        .all()
+        db.query(Chunk).filter(Chunk.document_id == document.id).order_by(Chunk.chunk_index).all()
     )
     assert len(chunks) > 0
     for chunk in chunks:
