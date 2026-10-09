@@ -199,7 +199,7 @@ test("AC-021/AC-022: switching between two documents and back preserves each thr
 }) => {
   await mockBackend(page, {
     initialDocs: [READY_DOC_A, READY_DOC_B],
-    onAsk: (docId, question) => ({
+    onAsk: (docId) => ({
       status: 200,
       body: {
         answer: docId === "doc-a" ? "Answer for A" : "Answer for B",
