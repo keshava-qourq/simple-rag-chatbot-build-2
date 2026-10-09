@@ -13,8 +13,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# The architecture's three accepted upload formats (doc_processor), also
-# returned verbatim by `GET /config/status` for the upload UI.
+# The architecture's three accepted upload formats (doc_processor).
 SUPPORTED_DOCUMENT_TYPES: list[str] = ["pdf", "docx", "txt"]
 
 
@@ -76,9 +75,15 @@ class AskResponse(BaseModel):
 
 
 class ConfigStatusResponse(BaseModel):
-    """200 body for `GET /config/status`."""
+    """200 body for `GET /config/status`.
+
+    Reports presence and model *names* only -- never a key or key fragment.
+    """
 
     model_config = ConfigDict(protected_namespaces=())
 
-    model_configured: bool
-    supported_types: list[str] = Field(default_factory=lambda: list(SUPPORTED_DOCUMENT_TYPES))
+    llm_configured: bool
+    embedding_configured: bool
+    llm_model: str | None = None
+    embedding_model: str | None = None
+    issues: list[str] = Field(default_factory=list)
