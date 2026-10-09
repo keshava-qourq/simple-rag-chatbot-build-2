@@ -21,7 +21,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 # backend/app/database.py -> backend/
@@ -53,6 +53,23 @@ _ensure_sqlite_directory_exists(DATABASE_URL)
 _connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True)
+
+# SQLite does not enforce foreign key constraints unless told to on every
+# connection -- without this, `ondelete="CASCADE"` on `Chunk.document_id`
+# (app.models) is declared but never actually applied, so deleting a
+# document silently leaves its chunks (and their embeddings) behind as
+# orphaned rows. Deletion depends on this pragma being on, not merely on the
+# ORM's own `passive_deletes=True` relationship, which defers entirely to
+# the database to perform the cascade.
+if DATABASE_URL.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

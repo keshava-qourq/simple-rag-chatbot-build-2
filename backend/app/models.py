@@ -72,20 +72,29 @@ class Document(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # `passive_deletes` is deliberately left at its default (False): the ORM
+    # itself issues a DELETE for every child row when a `Document` is
+    # deleted via `session.delete(...)`, instead of relying solely on the
+    # database to carry out `ondelete="CASCADE"` below. SQLite only honours
+    # that constraint when `PRAGMA foreign_keys=ON` has been set on the
+    # connection in use, which every caller is not guaranteed to have done
+    # (e.g. a test or script that opens its own engine) -- without the ORM
+    # doing the deletion itself, a document's chunks and embeddings are
+    # silently left behind as orphaned rows (AC-024/AC-025).
     chunks: Mapped[list[Chunk]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
-        passive_deletes=True,
     )
 
 
 class Chunk(Base):
     """One embedded chunk of a document (data_model: `chunks`).
 
-    `ondelete="CASCADE"` on the foreign key, plus the ORM's own
-    delete-orphan cascade above, are what "removing a document removes its
-    chunks and vectors in one operation" (datastore) comes down to at the
-    schema level; the delete handler itself is the development sprint's work.
+    `ondelete="CASCADE"` on the foreign key is a backstop for any delete
+    path that bypasses the ORM entirely (e.g. raw SQL); the ORM's own
+    delete-orphan cascade above is what actually removes a document's
+    chunks and vectors in the normal `session.delete(document)` path used
+    by the delete handler.
     """
 
     __tablename__ = "chunks"
