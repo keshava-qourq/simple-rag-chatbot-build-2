@@ -108,7 +108,9 @@ function toLibraryRow(created: DocumentCreateResponse): DocumentStatusResponse {
 /** Human label for a source reference: pages for PDFs, chunk numbers
  * otherwise (mirrors backend/app/schemas.py `SourceReference`, where exactly
  * one of the two is set). */
-function sourceLabel(source: { page_number: number | null; chunk_index: number | null } | null): string | null {
+function sourceLabel(
+  source: { page_number: number | null; chunk_index: number | null } | null,
+): string | null {
   if (!source) return null;
   if (source.page_number != null) return `Page ${source.page_number}`;
   if (source.chunk_index != null) return `Chunk ${source.chunk_index}`;
