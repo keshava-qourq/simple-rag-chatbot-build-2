@@ -151,9 +151,7 @@ class Settings(BaseSettings):
         if not self.llm_api_key:
             problems.append("LLM_API_KEY is not set; the LLM provider is unconfigured.")
         if not self.effective_embedding_api_key:
-            problems.append(
-                "EMBEDDING_API_KEY is not set; the embedding provider is unconfigured."
-            )
+            problems.append("EMBEDDING_API_KEY is not set; the embedding provider is unconfigured.")
         return problems
 
 

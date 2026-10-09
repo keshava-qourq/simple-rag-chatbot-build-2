@@ -28,7 +28,9 @@ SECRET_PATTERNS = [
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT-shaped
 ]
 
-KEY_ENV_VAR_RE = re.compile(r"^\s*([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*)\s*=\s*(.+)$")
+KEY_ENV_VAR_RE = re.compile(
+    r"^\s*([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*)\s*=\s*(.+)$"
+)
 
 
 def _iter_app_source_files():
