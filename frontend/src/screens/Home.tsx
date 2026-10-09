@@ -3,7 +3,7 @@ import React from "react";
 import * as UI from "@/lib/ui";
 import { Icons } from "@/lib/icons";
 import { brand } from "@/lib/brand";
-import { apiFetch, apiUpload } from "@/lib/api";
+import { apiFetch, apiUpload, askDocument } from "@/lib/api";
 import type {
   ConfigStatusResponse,
   DocumentCreateResponse,
@@ -12,8 +12,6 @@ import type {
 } from "@/lib/api";
 
 const { Input, Label } = UI;
-
-const FALLBACK = "I couldn't find that information in the uploaded document.";
 
 const TYPE_LABEL: Record<string, string> = { pdf: "PDF", docx: "DOCX", txt: "TXT" };
 
@@ -37,7 +35,6 @@ interface Message {
 
 interface Pending {
   docId: string;
-  question: string;
 }
 
 type BtnKind = "primary" | "quiet" | "plain";
@@ -106,6 +103,16 @@ function toLibraryRow(created: DocumentCreateResponse): DocumentStatusResponse {
     chunk_count: 0,
     created_at: created.created_at,
   };
+}
+
+/** Human label for a source reference: pages for PDFs, chunk numbers
+ * otherwise (mirrors backend/app/schemas.py `SourceReference`, where exactly
+ * one of the two is set). */
+function sourceLabel(source: { page_number: number | null; chunk_index: number | null } | null): string | null {
+  if (!source) return null;
+  if (source.page_number != null) return `Page ${source.page_number}`;
+  if (source.chunk_index != null) return `Chunk ${source.chunk_index}`;
+  return null;
 }
 
 export default function Screen() {
@@ -207,22 +214,6 @@ export default function Screen() {
     };
   }, []);
 
-  // Produce the (simulated) reply after a short "thinking" delay. Real
-  // retrieval and grounded generation are POST /documents/{id}/ask, which is
-  // out of scope this sprint.
-  React.useEffect(() => {
-    if (!pending) return;
-    const t = setTimeout(() => {
-      setThreads((prev) => {
-        const current = prev[pending.docId] || [];
-        return { ...prev, [pending.docId]: [...current, buildReply()] };
-      });
-      setPending(null);
-    }, 1200);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pending, config]);
-
   // Close the confirmation dialog with Escape.
   React.useEffect(() => {
     if (!deleteTarget) return;
@@ -240,24 +231,6 @@ export default function Screen() {
 
   function nowTime(): string {
     return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-
-  function buildReply(): Message {
-    if (config && !config.llm_configured) {
-      return {
-        id: `m_${Date.now()}`,
-        role: "notice",
-        text: "Answer generation needs a configured model. Set LLM_PROVIDER, LLM_MODEL and LLM_API_KEY in your .env file and restart. Uploading, processing and selecting documents still work without it.",
-        time: nowTime(),
-      };
-    }
-    return {
-      id: `m_${Date.now()}`,
-      role: "assistant",
-      text: FALLBACK,
-      source: null,
-      time: nowTime(),
-    };
   }
 
   async function handleFile(file: File | null | undefined) {
@@ -302,14 +275,40 @@ export default function Screen() {
     e.preventDefault();
   }
 
-  function onSend(e: React.FormEvent<HTMLFormElement>) {
+  // Real retrieval + grounded generation: POST /documents/{id}/ask. The
+  // question is appended to its document's own thread immediately, a loading
+  // indicator shows while the request is in flight, and the real answer (or
+  // the backend's readable error) lands in the same thread when it resolves.
+  async function onSend(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const q = question.trim();
     if (!q || !selected || selected.status !== "ready" || pending) return;
-    const msg: Message = { id: `m_${Date.now()}_u`, role: "user", text: q, time: nowTime() };
-    setThreads((prev) => ({ ...prev, [selected.id]: [...(prev[selected.id] || []), msg] }));
+    const docId = selected.id;
+    const userMsg: Message = { id: `m_${Date.now()}_u`, role: "user", text: q, time: nowTime() };
+    setThreads((prev) => ({ ...prev, [docId]: [...(prev[docId] || []), userMsg] }));
     setQuestion("");
-    setPending({ docId: selected.id, question: q });
+    setPending({ docId });
+    try {
+      const res = await askDocument(docId, q);
+      const reply: Message = {
+        id: `m_${Date.now()}_a`,
+        role: "assistant",
+        text: res.answer,
+        source: sourceLabel(res.source),
+        time: nowTime(),
+      };
+      setThreads((prev) => ({ ...prev, [docId]: [...(prev[docId] || []), reply] }));
+    } catch (err) {
+      const notice: Message = {
+        id: `m_${Date.now()}_e`,
+        role: "notice",
+        text: err instanceof Error ? err.message : "Could not get an answer. Please try again.",
+        time: nowTime(),
+      };
+      setThreads((prev) => ({ ...prev, [docId]: [...(prev[docId] || []), notice] }));
+    } finally {
+      setPending(null);
+    }
   }
 
   async function confirmDelete() {
@@ -648,7 +647,21 @@ export default function Screen() {
               </div>
             )}
 
-            {selected && thread.length === 0 && (
+            {selected && selected.status !== "ready" && (
+              <div className="flex h-full flex-col items-center justify-center py-12 text-center">
+                <Icons.AlertCircle
+                  className="h-7 w-7"
+                  style={{ color: "#A2967F" }}
+                  aria-hidden="true"
+                />
+                <h3 className="mt-3 text-base font-semibold">Not ready for questions yet</h3>
+                <p className="mt-1 max-w-sm text-sm" style={{ color: "#6B6256" }}>
+                  Select a processed document first — this one is still {selected.status}.
+                </p>
+              </div>
+            )}
+
+            {selected && selected.status === "ready" && thread.length === 0 && (
               <div className="py-8 text-center">
                 <Icons.FileText
                   className="mx-auto h-6 w-6"
@@ -662,68 +675,70 @@ export default function Screen() {
               </div>
             )}
 
-            {thread.map((m) =>
-              m.role === "user" ? (
-                <div key={m.id} className="flex justify-end">
-                  <div className="max-w-[85%]">
-                    <p
-                      className="rounded-xl px-4 py-2.5 text-sm leading-relaxed text-white"
-                      style={{ backgroundColor: "#2F5D50" }}
-                    >
-                      {m.text}
-                    </p>
-                    <p className="mt-1 text-right text-xs" style={{ color: "#6B6256" }}>
-                      You · {m.time}
-                    </p>
+            {selected &&
+              selected.status === "ready" &&
+              thread.map((m) =>
+                m.role === "user" ? (
+                  <div key={m.id} className="flex justify-end">
+                    <div className="max-w-[85%]">
+                      <p
+                        className="rounded-xl px-4 py-2.5 text-sm leading-relaxed text-white"
+                        style={{ backgroundColor: "#2F5D50" }}
+                      >
+                        {m.text}
+                      </p>
+                      <p className="mt-1 text-right text-xs" style={{ color: "#6B6256" }}>
+                        You · {m.time}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ) : m.role === "notice" ? (
-                <div
-                  key={m.id}
-                  role="status"
-                  className="flex max-w-[92%] items-start gap-3 rounded-xl border px-4 py-3 text-sm leading-relaxed"
-                  style={{ borderColor: "#E6BFB2", backgroundColor: "#F8E7E0", color: "#7C3020" }}
-                >
-                  <Icons.AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <div>
-                    <p className="font-medium">Answer generation unavailable</p>
-                    <p className="mt-1">{m.text}</p>
-                  </div>
-                </div>
-              ) : (
-                <div key={m.id} className="max-w-[92%]">
+                ) : m.role === "notice" ? (
                   <div
-                    className="rounded-xl border px-4 py-3"
-                    style={{ borderColor: "#E7DECE", backgroundColor: "#FFFFFF" }}
+                    key={m.id}
+                    role="status"
+                    className="flex max-w-[92%] items-start gap-3 rounded-xl border px-4 py-3 text-sm leading-relaxed"
+                    style={{ borderColor: "#E6BFB2", backgroundColor: "#F8E7E0", color: "#7C3020" }}
                   >
-                    <p className="text-sm leading-relaxed">{m.text}</p>
-                    {m.source ? (
-                      <p className="mt-3 flex flex-wrap items-center gap-2">
-                        <span
-                          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
-                          style={{ backgroundColor: "#F6E3D6", color: "#8A4420" }}
-                        >
-                          <Icons.FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                          Source: {m.source}
-                        </span>
-                        <span className="text-xs" style={{ color: "#6B6256" }}>
-                          {selected ? selected.file_name : ""}
-                        </span>
-                      </p>
-                    ) : (
-                      <p className="mt-3 text-xs" style={{ color: "#6B6256" }}>
-                        No supporting passage was found, so no source is shown.
-                      </p>
-                    )}
+                    <Icons.AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                    <div>
+                      <p className="font-medium">Answer unavailable</p>
+                      <p className="mt-1">{m.text}</p>
+                    </div>
                   </div>
-                  <p className="mt-1 text-xs" style={{ color: "#6B6256" }}>
-                    Reading Room · {m.time}
-                  </p>
-                </div>
-              ),
-            )}
+                ) : (
+                  <div key={m.id} className="max-w-[92%]">
+                    <div
+                      className="rounded-xl border px-4 py-3"
+                      style={{ borderColor: "#E7DECE", backgroundColor: "#FFFFFF" }}
+                    >
+                      <p className="text-sm leading-relaxed">{m.text}</p>
+                      {m.source ? (
+                        <p className="mt-3 flex flex-wrap items-center gap-2">
+                          <span
+                            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
+                            style={{ backgroundColor: "#F6E3D6", color: "#8A4420" }}
+                          >
+                            <Icons.FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                            Source: {m.source}
+                          </span>
+                          <span className="text-xs" style={{ color: "#6B6256" }}>
+                            {selected ? selected.file_name : ""}
+                          </span>
+                        </p>
+                      ) : (
+                        <p className="mt-3 text-xs" style={{ color: "#6B6256" }}>
+                          No supporting passage was found, so no source is shown.
+                        </p>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs" style={{ color: "#6B6256" }}>
+                      Reading Room · {m.time}
+                    </p>
+                  </div>
+                ),
+              )}
 
-            {pending && (
+            {pending && pending.docId === selectedId && (
               <div
                 role="status"
                 className="flex items-center gap-3 text-sm"
@@ -774,7 +789,7 @@ export default function Screen() {
             >
               {selected && selected.status === "ready"
                 ? "Answers come only from this document. If it isn't in there, you'll be told so rather than guessed at."
-                : "Sending is blocked until you select a document with a ready status."}
+                : "Select a processed document first — sending is blocked until one with a ready status is chosen."}
             </p>
           </form>
         </section>

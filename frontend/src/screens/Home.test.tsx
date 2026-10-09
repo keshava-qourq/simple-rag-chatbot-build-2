@@ -1,17 +1,20 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiFetch, apiUpload } from "@/lib/api";
+import { apiFetch, apiUpload, askDocument } from "@/lib/api";
+import type { AskResponse } from "@/lib/api";
 
 import Home from "./Home";
 
 vi.mock("@/lib/api", () => ({
   apiFetch: vi.fn(),
   apiUpload: vi.fn(),
+  askDocument: vi.fn(),
 }));
 
 const mockedApiFetch = vi.mocked(apiFetch);
 const mockedApiUpload = vi.mocked(apiUpload);
+const mockedAskDocument = vi.mocked(askDocument);
 
 const CONFIG_OK = {
   llm_configured: true,
@@ -53,6 +56,7 @@ function setupFetch({
 beforeEach(() => {
   mockedApiFetch.mockReset();
   mockedApiUpload.mockReset();
+  mockedAskDocument.mockReset();
 });
 
 afterEach(() => {
@@ -363,5 +367,252 @@ describe("Home screen", () => {
       await vi.advanceTimersByTimeAsync(9000);
     });
     expect(call).toBe(2);
+  });
+
+  it("sends a question, shows a loading indicator, then renders the real answer from the ask endpoint", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    let resolveAsk: (value: AskResponse) => void = () => {};
+    mockedAskDocument.mockImplementation(
+      () =>
+        new Promise<AskResponse>((resolve) => {
+          resolveAsk = resolve;
+        }),
+    );
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "What does clause 4 say?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(screen.getByText("What does clause 4 say?")).toBeInTheDocument();
+    expect(screen.getByText(/Retrieving the most relevant passages/)).toBeInTheDocument();
+    expect(mockedAskDocument).toHaveBeenCalledWith("doc-1", "What does clause 4 say?");
+
+    await act(async () => {
+      resolveAsk({
+        answer: "Clause 4 requires 30 days' notice.",
+        source: { document_name: "Report.pdf", page_number: 4, chunk_index: null },
+        is_fallback: false,
+        model_configured: true,
+      });
+    });
+
+    expect(await screen.findByText("Clause 4 requires 30 days' notice.")).toBeInTheDocument();
+    expect(screen.getByText("Source: Page 4")).toBeInTheDocument();
+    expect(screen.queryByText(/Retrieving the most relevant passages/)).not.toBeInTheDocument();
+  });
+
+  it("renders the backend's readable error message instead of a fabricated answer on a failed ask", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockRejectedValue(new Error("Retrieval is unavailable right now."));
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Any notice period?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByText("Retrieval is unavailable right now.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("I couldn't find that information in the uploaded document."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("blocks sending and disables the question box when no document is selected", async () => {
+    setupFetch({ docs: [] });
+    render(<Home />);
+    await screen.findByText("Your shelf is empty");
+
+    const input = await screen.findByLabelText("Your question");
+    expect(input).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Select a processed document first — sending is blocked until one with a ready status is chosen.",
+      ),
+    ).toBeInTheDocument();
+    expect(mockedAskDocument).not.toHaveBeenCalled();
+  });
+
+  it("blocks sending when the selected document is processing, not ready", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Draft.txt",
+          file_type: "txt",
+          status: "processing",
+          error_message: null,
+          chunk_count: 0,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    render(<Home />);
+    await screen.findByText("Draft.txt");
+
+    const input = await screen.findByLabelText("Your question");
+    expect(input).toBeDisabled();
+    expect(mockedAskDocument).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing and adds no message for an empty or whitespace-only question", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "Report.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+    });
+    render(<Home />);
+    fireEvent.click(await screen.findByText("Report.pdf"));
+
+    const input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(mockedAskDocument).not.toHaveBeenCalled();
+    expect(screen.getByText("This thread is empty")).toBeInTheDocument();
+  });
+
+  it("keeps per-document threads separate when switching between two ready documents and back", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "First.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+        {
+          id: "doc-2",
+          file_name: "Second.txt",
+          file_type: "txt",
+          status: "ready",
+          error_message: null,
+          chunk_count: 5,
+          created_at: "2026-10-02T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockImplementation(async (id: string) => ({
+      answer: id === "doc-1" ? "Answer for A" : "Answer for B",
+      source: null,
+      is_fallback: false,
+      model_configured: true,
+    }));
+    render(<Home />);
+    await screen.findByText("First.pdf");
+    await screen.findByText("Second.txt");
+
+    fireEvent.click(screen.getByText("First.pdf"));
+    let input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Question for A" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    expect(await screen.findByText("Answer for A")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Second.txt"));
+    expect(screen.queryByText("Question for A")).not.toBeInTheDocument();
+    expect(screen.getByText("This thread is empty")).toBeInTheDocument();
+
+    input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Question for B" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    expect(await screen.findByText("Answer for B")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("First.pdf"));
+    expect(await screen.findByText("Question for A")).toBeInTheDocument();
+    expect(await screen.findByText("Answer for A")).toBeInTheDocument();
+    expect(screen.queryByText("Question for B")).not.toBeInTheDocument();
+    expect(screen.queryByText("Answer for B")).not.toBeInTheDocument();
+  });
+
+  it("clears only the selected document's thread with New chat, leaving another document's thread untouched", async () => {
+    setupFetch({
+      docs: [
+        {
+          id: "doc-1",
+          file_name: "First.pdf",
+          file_type: "pdf",
+          status: "ready",
+          error_message: null,
+          chunk_count: 2,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+        {
+          id: "doc-2",
+          file_name: "Second.txt",
+          file_type: "txt",
+          status: "ready",
+          error_message: null,
+          chunk_count: 5,
+          created_at: "2026-10-02T00:00:00Z",
+        },
+      ],
+    });
+    mockedAskDocument.mockImplementation(async (id: string) => ({
+      answer: id === "doc-1" ? "Answer for A" : "Answer for B",
+      source: null,
+      is_fallback: false,
+      model_configured: true,
+    }));
+    render(<Home />);
+    await screen.findByText("First.pdf");
+    await screen.findByText("Second.txt");
+
+    fireEvent.click(screen.getByText("First.pdf"));
+    let input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Question for A" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await screen.findByText("Answer for A");
+
+    fireEvent.click(screen.getByText("Second.txt"));
+    input = await screen.findByLabelText("Your question");
+    fireEvent.change(input, { target: { value: "Question for B" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await screen.findByText("Answer for B");
+
+    fireEvent.click(screen.getByText("First.pdf"));
+    await screen.findByText("Question for A");
+    fireEvent.click(screen.getByText("New chat"));
+    expect(screen.queryByText("Question for A")).not.toBeInTheDocument();
+    expect(screen.getByText("This thread is empty")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Second.txt"));
+    expect(await screen.findByText("Question for B")).toBeInTheDocument();
+    expect(screen.getByText("Answer for B")).toBeInTheDocument();
   });
 });

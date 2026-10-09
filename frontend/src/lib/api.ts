@@ -45,6 +45,23 @@ export interface ConfigStatusResponse {
   issues: string[];
 }
 
+/**
+ * Mirrors `SourceReference` / `AskResponse` in backend/app/schemas.py.
+ * Exactly one of `page_number` (PDF) or `chunk_index` (DOCX/TXT) is set.
+ */
+export interface AskSourceReference {
+  document_name: string;
+  page_number: number | null;
+  chunk_index: number | null;
+}
+
+export interface AskResponse {
+  answer: string;
+  source: AskSourceReference | null;
+  is_fallback: boolean;
+  model_configured: boolean;
+}
+
 async function readErrorMessage(response: Response, fallback: string): Promise<string> {
   try {
     const body = await response.json();
@@ -115,4 +132,17 @@ export function deleteDocument(id: string): Promise<void> {
 
 export function fetchConfigStatus(): Promise<ConfigStatusResponse> {
   return apiFetch<ConfigStatusResponse>("/config/status");
+}
+
+/**
+ * POST /documents/{id}/ask -> AskResponse.
+ * 400 empty question, 409 document not ready, 503 retrieval unavailable; in
+ * each case the backend's `detail` is the user-facing message and surfaces
+ * via the thrown Error's `message` (see `readErrorMessage`).
+ */
+export function askDocument(id: string, question: string): Promise<AskResponse> {
+  return apiFetch<AskResponse>(`/documents/${id}/ask`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
 }
