@@ -46,11 +46,7 @@ interface MockOptions {
     docs: unknown[],
   ) => Promise<boolean> | boolean /* true: route handled, nothing more to do */;
   /** Called on every ask; defaults to a canned 200 answer. */
-  onAsk?: (
-    callCount: number,
-    docId: string,
-    question: string,
-  ) => { status: number; body: unknown };
+  onAsk?: (callCount: number, docId: string, question: string) => { status: number; body: unknown };
   askDelayMs?: number;
 }
 
@@ -372,7 +368,9 @@ test("AC-056: a failed ask shows a distinct in-context error and a later ask sti
   await input.fill("Second question");
   await page.getByRole("button", { name: /Send/ }).click();
   await expect(page.getByText(/Answer for doc-a: Second question/)).toBeVisible();
-  const assistantCard = page.locator("div", { hasText: /Answer for doc-a: Second question/ }).last();
+  const assistantCard = page
+    .locator("div", { hasText: /Answer for doc-a: Second question/ })
+    .last();
   await expect(assistantCard).not.toHaveCSS("background-color", "rgb(248, 231, 224)");
 });
 
