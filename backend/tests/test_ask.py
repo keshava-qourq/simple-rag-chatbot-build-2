@@ -25,7 +25,7 @@ from app.config import Settings, get_settings
 from app.database import Base, get_db
 from app.main import app
 from app.models import Chunk, Document
-from app.services import retrieval, storage
+from app.services import answer_gen, retrieval, storage
 from app.services.embedder import EmbeddingError
 
 TEST_DB_URL = "sqlite:///./test_ask.db"
@@ -58,6 +58,7 @@ def _fresh_schema_and_overrides(tmp_path, monkeypatch):
     else:
         app.dependency_overrides.pop(get_db, None)
     Base.metadata.drop_all(bind=engine)
+    get_settings.cache_clear()
 
 
 def _make_ready_document(db, file_name: str = "notes.txt") -> Document:
@@ -306,6 +307,11 @@ def test_ask_embedding_failure_never_includes_the_raw_api_key_anywhere_in_the_bo
 def test_ask_returns_answer_and_source_from_top_matching_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """With an LLM configured, the endpoint returns the model's grounded
+    reply and the source of the top matching chunk (AC-037, AC-040/AC-041).
+    The no-model case (no LLM configured) is covered separately by
+    `test_answer_gen.py::test_ask_endpoint_no_model_configured_returns_plain_notice_with_model_configured_false`.
+    """
     db = TestingSessionLocal()
     document = _make_ready_document(db)
     _add_chunk(db, document.id, 0, "irrelevant filler text", [0.0, 1.0], page_number=1)
@@ -313,6 +319,10 @@ def test_ask_returns_answer_and_source_from_top_matching_chunk(
     db.close()
 
     monkeypatch.setattr(retrieval, "embed_texts", lambda texts, settings: [[1.0, 0.0]])
+    monkeypatch.setattr(answer_gen, "_call_llm", lambda q, chunks, settings: "Paris.")
+    get_settings.cache_clear()
+    monkeypatch.setenv("LLM_API_KEY", "test-llm-key")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embed-key")
 
     response = client.post(
         f"/documents/{document.id}/ask", json={"question": "What is the capital of France?"}
@@ -322,8 +332,10 @@ def test_ask_returns_answer_and_source_from_top_matching_chunk(
     body = response.json()
     assert "Paris" in body["answer"]
     assert body["source"]["page_number"] == 2
-    assert body["is_fallback"] is True
-    assert "model_configured" in body
+    assert body["is_fallback"] is False
+    assert body["model_configured"] is True
+
+    get_settings.cache_clear()
 
 
 def test_ask_with_no_matching_chunks_returns_no_fabricated_answer(
